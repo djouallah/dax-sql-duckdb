@@ -150,11 +150,17 @@ FROM "Product" WHERE "ProductKey" IN (SELECT Product.ProductKey FROM contoso WHE
 ----
 true
 
-# bracketed names, as dax-sql takes them
+# a measure whose name has a space: AGG("…"), SQL's quoted name
 query I
-SELECT (SELECT AGG([Sales Amount]) FROM contoso) > 0;
+SELECT (SELECT AGG("Sales Amount") FROM contoso) > 0;
 ----
 true
+
+# queries are SQL: DAX's [Measure] is not
+statement error
+SELECT (SELECT AGG([Sales Amount]) FROM contoso) > 0;
+----
+syntax error
 
 statement error
 SELECT * FROM contoso;
