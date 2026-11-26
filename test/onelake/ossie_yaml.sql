@@ -9,7 +9,6 @@
 -- first statement that fails, or check that calls error(), stops the run.
 
 LOAD '${EXT}';
-SET GLOBAL azure_transport_option_type = '${AZURE_TRANSPORT_OPTION_TYPE}';
 CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '${STORAGE_TOKEN}');
 .echo off
 ATTACH '${WS_ID}/${LH_ID}' AS nem_lake (TYPE iceberg, URI 'https://onelake.table.fabric.microsoft.com/iceberg',

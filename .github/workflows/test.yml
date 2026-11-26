@@ -1,7 +1,7 @@
 #
 # Tests the extension the build workflow built last, without building it again: the sqllogictest
-# files in Python duckdb 2.0.0 (.github/scripts/run_tests.py), a contoso script in the official
-# v2.0.0 CLI, and the CLI reading OneLake's Iceberg REST catalog the way the extension will
+# files in Python duckdb 2.0.1 (.github/scripts/run_tests.py), a contoso script in the official
+# v2.0.1 CLI, and the CLI reading OneLake's Iceberg REST catalog the way the extension will
 # (EXTENSION.md, Where the data comes from). OneLake's identity is an OIDC federated login to
 # Azure, as in dax-sql (repository variables AZURE_CLIENT_ID, AZURE_TENANT_ID, WS_ID, LH_ID).
 #
@@ -43,10 +43,6 @@ jobs:
       AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       LH_ID: ${{ vars.LH_ID }}
-      # The azure extension's default transport cannot find the CA bundle on GitHub runners:
-      # curl, with the runner's bundle (as aac-dbt-waste's workflows do).
-      AZURE_TRANSPORT_OPTION_TYPE: curl
-      CURL_CA_INFO: /etc/ssl/certs/ca-certificates.crt
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,15 +69,15 @@ jobs:
         run: node test/tools/bim_to_tmdl.mjs third_party/dax-sql/conformance/models/contoso/model.bim test/models/generated/contoso
       - name: The sqllogictests
         run: |
-          pip install -q duckdb==2.0.0
+          pip install -q duckdb==2.0.1
           python .github/scripts/run_tests.py "$EXT" test/sql/*.test
-      - name: DuckDB v2.0.0 CLI
+      - name: DuckDB v2.0.1 CLI
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           # In cli/: the checkout's duckdb/ is the submodule's place.
           mkdir -p cli
-          curl -sSfL https://github.com/duckdb/duckdb/releases/download/v2.0.0/duckdb-cli-linux-amd64.tar.gz | tar -xz -C cli
+          curl -sSfL https://github.com/duckdb/duckdb/releases/download/v2.0.1/duckdb-cli-linux-amd64.tar.gz | tar -xz -C cli
           ./cli/duckdb -version
       - name: A semantic view over contoso in the CLI
         if: ${{ !cancelled() }}
@@ -93,7 +89,6 @@ jobs:
           TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
           echo "::add-mask::$TOKEN"
           cat > onelake.sql <<SQL
-          SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE';
           CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$TOKEN');
           ATTACH '$WS_ID/$LH_ID' AS ol (
               TYPE iceberg,
@@ -123,7 +118,6 @@ jobs:
           python .github/scripts/onelake_bim.py "$WS_ID" "${{ vars.SM_ID }}" "$LH_ID" dax_sql_test/nem.bim nem.bim
           cat > directlake.sql <<SQL
           LOAD '$EXT';
-          SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE';
           CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$STORAGE_TOKEN');
           .echo on
           CREATE SEMANTIC VIEW nem FROM 'abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID/Files/dax_sql_test/nem.bim';
@@ -178,9 +172,8 @@ jobs:
           set -euo pipefail
           STORAGE_TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
           echo "::add-mask::$STORAGE_TOKEN"
-          SETUP="SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE';"
-          ./cli/duckdb -unsigned -bail kept.duckdb -c "LOAD '$EXT'" -c "$SETUP"             -c "CREATE PERSISTENT SECRET onelake_kept (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$STORAGE_TOKEN')"             -c "CREATE SEMANTIC VIEW nem FROM 'abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID/Files/dax_sql_test/nem.bim'"
-          ./cli/duckdb -unsigned -bail kept.duckdb -c "SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE'"             -c "LOAD '$EXT'" -c "SHOW SEMANTIC VIEWS"             -c "SELECT CASE WHEN data_as_of LIKE 'snapshots of %' THEN 'framed again on load' ELSE error('not framed on load: ' || data_as_of) END AS \"check\" FROM (SHOW SEMANTIC VIEWS) WHERE view_name = 'nem'"             -c "SELECT dim_region.Region, AGG(\"Registered units\") AS units FROM nem GROUP BY ALL ORDER BY Region"
+          ./cli/duckdb -unsigned -bail kept.duckdb -c "LOAD '$EXT'"             -c "CREATE PERSISTENT SECRET onelake_kept (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$STORAGE_TOKEN')"             -c "CREATE SEMANTIC VIEW nem FROM 'abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID/Files/dax_sql_test/nem.bim'"
+          ./cli/duckdb -unsigned -bail kept.duckdb -c "LOAD '$EXT'" -c "SHOW SEMANTIC VIEWS"             -c "SELECT CASE WHEN data_as_of LIKE 'snapshots of %' THEN 'framed again on load' ELSE error('not framed on load: ' || data_as_of) END AS \"check\" FROM (SHOW SEMANTIC VIEWS) WHERE view_name = 'nem'"             -c "SELECT dim_region.Region, AGG(\"Registered units\") AS units FROM nem GROUP BY ALL ORDER BY Region"
           ./cli/duckdb -c "DROP PERSISTENT SECRET onelake_kept"
           rm kept.duckdb
       - name: A Direct Lake view with a credential_chain secret (workload identity)
@@ -195,7 +188,6 @@ jobs:
           .github/scripts/entra_token.sh --oidc > "$AZURE_FEDERATED_TOKEN_FILE"
           BIM="abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID/Files/dax_sql_test/nem.bim"
           ./cli/duckdb -unsigned -bail -c "LOAD '$EXT'" \
-            -c "SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE'" \
             -c "CREATE SECRET onelake (TYPE azure, PROVIDER credential_chain, CHAIN 'workload_identity')" \
             -c "CREATE SEMANTIC VIEW nem FROM '$BIM'" \
             -c "SELECT view_name, tables_from FROM (SHOW SEMANTIC VIEWS)" \
@@ -220,7 +212,7 @@ jobs:
           echo "::add-mask::$STORAGE_TOKEN"
           CONTOSO=third_party/dax-sql/conformance/models/contoso/model.bim
           FORMATS="aac_ossie=third_party/dax-sql/conformance/models/aac/ossie.yaml contoso_tmdl=test/models/generated/contoso.tmdl"
-          DRIFT_SETUP="SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE'; CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$STORAGE_TOKEN');" \
+          DRIFT_SETUP="CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$STORAGE_TOKEN');" \
             python .github/scripts/drift.py "$EXT" nem=nem.bim contoso=$CONTOSO $FORMATS -- test/directlake/queries.sql test/drift/contoso.sql test/drift/formats.sql
       - name: The orphan answers change the SQL, not the rows
         if: ${{ !cancelled() }}
@@ -232,7 +224,6 @@ jobs:
           STORAGE_TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
           echo "::add-mask::$STORAGE_TOKEN"
           export STORAGE_TOKEN
-          SETUP="SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE'; CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$STORAGE_TOKEN');" \
             python .github/scripts/facts.py "$EXT" nem.bim test/directlake/queries.sql
 
   # The wasm_eh build in DuckDB-Wasm, in headless Chromium: what works in the browser and what
