@@ -363,7 +363,9 @@ function dataAsOf(v) {
   const checked = answers.length
     ? `${answers.length} relationships checked, ${found} with keys their one side lacks`
     : `relationships not checked${v.frameError ? ` (${v.frameError})` : ''}`;
-  return `snapshots of ${f.at ?? 'unknown time'}, ${n} of ${all} tables pinned; ${checked}`;
+  const unpinned = lakeTables(v).filter(t => !(t in f.pins));
+  const read = unpinned.length ? ` (no snapshot, read as they are now: ${unpinned.join(', ')})` : '';
+  return `snapshots of ${f.at ?? 'unknown time'}, ${n} of ${all} tables pinned${read}; ${checked}`;
 }
 
 // Where a view's tables are read from, as SHOW SEMANTIC VIEWS says.
