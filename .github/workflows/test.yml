@@ -232,10 +232,12 @@ jobs:
   wasm:
     # A build of a fork's pull request is not tested here: this job checks out the built commit and
     # runs its scripts with OneLake's identity (id-token: write).
+    # Only with the full build (repository variable FULL_CI 'true'), which builds wasm_eh.
     if: >-
+      vars.FULL_CI == 'true' && (
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
+       github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
