@@ -65,12 +65,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: contoso as TMDL, one file and a folder (test/sql/formats.test reads them)
-        run: node test/tools/bim_to_tmdl.mjs third_party/dax-sql/conformance/models/contoso/model.bim test/models/generated/contoso
-      - name: aac's ossie.yaml as a Fabric semantic view's folder of YAML files (test/sql/formats.test reads them)
+      - name: The test fixtures are what the tools write (test/models/fixtures)
+        # formats.test and persistence.test read contoso as TMDL and aac's ossie.yaml as a Fabric
+        # semantic view's folder of YAML files. They are committed, so the sqllogictests need no step
+        # before them (as in community-extensions' build); this checks they are still the tools' output.
         run: |
           set -euo pipefail
           G=test/models/generated
+          node test/tools/bim_to_tmdl.mjs third_party/dax-sql/conformance/models/contoso/model.bim $G/contoso
           node test/tools/ossie_to_folder.mjs third_party/dax-sql/conformance/models/aac/ossie.yaml $G/aac_ossie
           # the folders formats.test refuses: a dataset twice, two descriptions, a file with no name
           cp -r $G/aac_ossie $G/aac_ossie_twice && cp $G/aac_ossie/datasets/dimensions.yaml $G/aac_ossie_twice/extra.yaml
@@ -78,6 +80,7 @@ jobs:
           { echo 'version: 0.3.0.dev0'; echo 'name: aac'; echo 'description: another one'; } > $G/aac_ossie_descriptions/other.yaml
           cp -r $G/aac_ossie $G/aac_ossie_unnamed
           { echo 'version: 0.3.0.dev0'; echo 'metrics: []'; } > $G/aac_ossie_unnamed/unnamed.yaml
+          diff -r test/models/fixtures $G
       - name: The sqllogictests
         run: |
           pip install -q duckdb==2.0.1
@@ -222,7 +225,7 @@ jobs:
           STORAGE_TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
           echo "::add-mask::$STORAGE_TOKEN"
           CONTOSO=third_party/dax-sql/conformance/models/contoso/model.bim
-          FORMATS="aac_ossie=third_party/dax-sql/conformance/models/aac/ossie.yaml contoso_tmdl=test/models/generated/contoso.tmdl"
+          FORMATS="aac_ossie=third_party/dax-sql/conformance/models/aac/ossie.yaml contoso_tmdl=test/models/fixtures/contoso.tmdl"
           DRIFT_SETUP="CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$STORAGE_TOKEN');" \
             python .github/scripts/drift.py "$EXT" nem=nem.bim contoso=$CONTOSO $FORMATS -- test/directlake/queries.sql test/drift/contoso.sql test/drift/formats.sql
       - name: The orphan answers change the SQL, not the rows

@@ -1,0 +1,25 @@
+table Date
+	dataCategory: Time
+
+	column Date
+		dataType: dateTime
+		sourceColumn: Date
+		isKey
+
+	column Year
+		dataType: int64
+		sourceColumn: Year
+
+	column Month
+		dataType: int64
+		sourceColumn: Month
+
+	column Quarter
+		dataType: int64
+		sourceColumn: Quarter
+
+	partition Date = entity
+
+		source
+			entityName: Date
+

@@ -18,8 +18,18 @@
 #include "duckdb/main/http/http_util.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/main/client_context_state.hpp"
+#include "duckdb/main/connection_manager.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/parser/parser.hpp"
-#include "duckdb/parser/parser_extension.hpp"
+#include "duckdb/parser/statement/copy_statement.hpp"
+#include "duckdb/parser/statement/create_statement.hpp"
+#include "duckdb/parser/statement/explain_statement.hpp"
+#include "duckdb/parser/statement/insert_statement.hpp"
+#include "duckdb/parser/statement/prepare_statement.hpp"
+#include "duckdb/parser/statement/select_statement.hpp"
+#include "duckdb/planner/extension_callback.hpp"
+#include "dax_sql_grammar.hpp"
 #include "js_engine.hpp"
 #include "onelake_fs.hpp"
 
@@ -58,45 +68,118 @@ struct DaxSqlState {
 	}
 };
 
-struct DaxSqlParserInfo : public ParserExtensionInfo {
-	explicit DaxSqlParserInfo(shared_ptr<DaxSqlState> state_p) : state(std::move(state_p)) {
-	}
-	shared_ptr<DaxSqlState> state;
-};
-
 struct DaxSqlFunctionInfo : public TableFunctionInfo {
 	explicit DaxSqlFunctionInfo(shared_ptr<DaxSqlState> state_p) : state(std::move(state_p)) {
 	}
 	shared_ptr<DaxSqlState> state;
 };
 
-//===--------------------------------------------------------------------===//
-// The parser override: a statement that names a semantic view, or says SEMANTIC, goes through
-// the glue's rewrite (dax-sql's compileStatement for model queries), and DuckDB parses what
-// comes back. Any other statement is left to DuckDB's parser.
-//===--------------------------------------------------------------------===//
-// Set while the extension runs a view's frame statements (FrameView): they are its own SQL, and
-// are left to DuckDB's parser.
+// Set while the extension runs statements of its own (FrameView, the stored rows, SHOW's rows):
+// their errors are theirs, not a model query's.
 static thread_local bool framing = false;
 
-static ParserOverrideResult DaxSqlParserOverride(ParserExtensionInfo *info, const string &query,
-                                                 ParserOptions &options) {
-	auto &state = *info->Cast<DaxSqlParserInfo>().state;
-	if (framing || !state.MightBeOurs(query)) {
-		return ParserOverrideResult();
-	}
-	auto sql = state.js.Call("rewrite", {query});
-	if (sql.empty()) {
-		return ParserOverrideResult();
-	}
-	// DROP SEMANTIC VIEW forgets the view as it is rewritten.
-	state.RefreshNames();
-	auto inner = options;
-	inner.parser_override_setting = AllowParserOverride::DEFAULT_OVERRIDE;
-	Parser parser(inner);
+//===--------------------------------------------------------------------===//
+// Model queries: plain SQL that DuckDB parses, and that fails to bind on the view's name. On that
+// error the statement's own text goes to the glue (dax-sql's compileStatement for each model query
+// in it, DESCRIBE v as its rows); the SQL that comes back is parsed, its body put in the
+// statement's place, and DuckDB binds it again. The extension's own statements are grammar rules
+// (dax_sql_grammar.cpp).
+//===--------------------------------------------------------------------===//
+static unique_ptr<SQLStatement> ParseOne(ClientContext &context, const string &sql) {
+	// the connection's parser settings
+	auto options = ParserOptions::Builtin();
+	options.identifier_case_mode = Settings::Get<PreserveIdentifierCaseSetting>(context);
+	options.integer_division = Settings::Get<IntegerDivisionSetting>(context);
+	options.regex_match_operator_semantics = Settings::Get<RegexMatchOperatorSemanticsSetting>(context);
+	options.max_expression_depth = Settings::Get<MaxExpressionDepthSetting>(context);
+	Parser parser(options);
 	parser.ParseQuery(sql);
-	return ParserOverrideResult(std::move(parser.statements));
+	if (parser.statements.size() != 1) {
+		return nullptr;
+	}
+	return std::move(parser.statements[0]);
 }
+
+//! The body of `fresh` in place of `statement`'s: both the same kind of statement, parsed from the
+//! same text but for its model queries
+static bool SwapBody(SQLStatement &statement, SQLStatement &fresh) {
+	if (statement.type != fresh.type) {
+		return false;
+	}
+	switch (statement.type) {
+	case StatementType::SELECT_STATEMENT:
+		statement.Cast<SelectStatement>().node = std::move(fresh.Cast<SelectStatement>().node);
+		break;
+	case StatementType::EXPLAIN_STATEMENT:
+		statement.Cast<ExplainStatement>().stmt = std::move(fresh.Cast<ExplainStatement>().stmt);
+		break;
+	case StatementType::CREATE_STATEMENT:
+		statement.Cast<CreateStatement>().info = std::move(fresh.Cast<CreateStatement>().info);
+		break;
+	case StatementType::INSERT_STATEMENT:
+		statement.Cast<InsertStatement>().node = std::move(fresh.Cast<InsertStatement>().node);
+		break;
+	case StatementType::COPY_STATEMENT:
+		statement.Cast<CopyStatement>().info = std::move(fresh.Cast<CopyStatement>().info);
+		break;
+	case StatementType::PREPARE_STATEMENT:
+		statement.Cast<PrepareStatement>().statement = std::move(fresh.Cast<PrepareStatement>().statement);
+		break;
+	default:
+		return false;
+	}
+	statement.named_param_map = fresh.named_param_map;
+	statement.has_anonymous_parameters = fresh.has_anonymous_parameters;
+	return true;
+}
+
+class DaxSqlRebindState : public ClientContextState {
+public:
+	static constexpr const char *KEY = "dax_sql_rebind";
+
+	explicit DaxSqlRebindState(shared_ptr<DaxSqlState> state_p) : state(std::move(state_p)) {
+	}
+
+	bool CanRequestRebind() override {
+		return true;
+	}
+
+	RebindQueryInfo OnPlanningError(ClientContext &context, SQLStatement &statement, ErrorData &error) override {
+		if (framing || (error.Type() != ExceptionType::CATALOG && error.Type() != ExceptionType::BINDER)) {
+			return RebindQueryInfo::DO_NOT_REBIND;
+		}
+		if (statement.query.empty() || !state->MightBeOurs(statement.query)) {
+			return RebindQueryInfo::DO_NOT_REBIND;
+		}
+		// a compiler error (SEMANTIC, UNSUPPORTED, ...) is thrown from here, as the statement's error
+		auto sql = state->js.Call("bind_sql", {statement.query});
+		if (sql.empty()) {
+			return RebindQueryInfo::DO_NOT_REBIND;
+		}
+		auto fresh = ParseOne(context, sql);
+		if (!fresh || !SwapBody(statement, *fresh)) {
+			return RebindQueryInfo::DO_NOT_REBIND;
+		}
+		// the compiled text names no view: a second failure is DuckDB's own
+		statement.query = sql;
+		return RebindQueryInfo::ATTEMPT_TO_REBIND;
+	}
+
+private:
+	shared_ptr<DaxSqlState> state;
+};
+
+class DaxSqlConnectionCallback : public ExtensionCallback {
+public:
+	explicit DaxSqlConnectionCallback(shared_ptr<DaxSqlState> state_p) : state(std::move(state_p)) {
+	}
+	void OnConnectionOpened(ClientContext &context) override {
+		context.registered_state->GetOrCreate<DaxSqlRebindState>(DaxSqlRebindState::KEY, state);
+	}
+
+private:
+	shared_ptr<DaxSqlState> state;
+};
 
 //===--------------------------------------------------------------------===//
 // dax_sql_define(db, schema, name, path, mode): what CREATE SEMANTIC VIEW is rewritten to ('' for
@@ -104,13 +187,13 @@ static ParserOverrideResult DaxSqlParserOverride(ParserExtensionInfo *info, cons
 // the file does not compile), attaches its OneLake lakehouses, and returns the row stored in the
 // schema's dax_sql_semantic_views: none when IF NOT EXISTS finds the view there.
 //===--------------------------------------------------------------------===//
+//! The rows a table function of the extension's returns, computed at bind
 struct DefineData : public TableFunctionData {
-	vector<Value> row;
-	bool emit = false;
+	vector<vector<Value>> rows;
 };
 
 struct DefineState : public GlobalTableFunctionState {
-	bool done = false;
+	idx_t offset = 0;
 };
 
 static string ReadFile(ClientContext &context, const string &path) {
@@ -426,15 +509,19 @@ static string QueryOneRow(Connection &con, const string &sql, string &row) {
 	return "";
 }
 
+//! While it lives, the statements the extension runs are its own (`framing`)
+struct Framing {
+	Framing() : was(framing) {
+		framing = true;
+	}
+	~Framing() {
+		framing = was;
+	}
+	bool was;
+};
+
 static void FrameView(Connection &con, DaxSqlState &state, const string &name) {
-	struct Framing {
-		Framing() {
-			framing = true;
-		}
-		~Framing() {
-			framing = false;
-		}
-	} guard;
+	Framing guard;
 	try {
 		auto pins = state.js.Call("frame_sql", {name});
 		if (pins.empty()) {
@@ -482,55 +569,183 @@ static unique_ptr<FunctionData> RefreshBind(ClientContext &context, TableFunctio
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
 	names = {"view_name", "data_as_of"};
 	auto data = make_uniq<DefineData>();
-	data->emit = true;
-	data->row = {Value(name), Value(state.js.Call("data_as_of", {name}))};
+	data->rows.push_back({Value(name), Value(state.js.Call("data_as_of", {name}))});
 	return std::move(data);
 }
 
-static unique_ptr<FunctionData> DefineBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto &state = *input.info->Cast<DaxSqlFunctionInfo>().state;
+//! A view defined from its file, as dax_sql_define and dax_sql_create do it
+struct DefinedView {
+	string db, schema, name, path, text;
+	bool created = false;
+};
+
+static vector<string> StringArgs(TableFunctionBindInput &input, const char *function) {
 	vector<string> args;
 	for (auto &v : input.inputs) {
 		if (v.IsNull()) {
-			throw InvalidInputException("dax_sql_define: an argument is NULL");
+			throw InvalidInputException("%s: an argument is NULL", function);
 		}
-		args.push_back(StringValue::Get(v));
+		args.push_back(v.type().id() == LogicalTypeId::BOOLEAN ? (BooleanValue::Get(v) ? "true" : "false")
+		                                                        : StringValue::Get(v));
 	}
-	auto db = args[0];
-	auto schema = args[1];
-	auto &name = args[2];
-	// Not given: the session's database and schema.
-	if (db.empty()) {
-		db = DatabaseManager::GetDefaultDatabase(context).GetIdentifierName();
-	}
-	if (schema.empty()) {
-		schema = ClientData::Get(context).catalog_search_path->GetDefault().GetSchema().GetIdentifierName();
-	}
-	if (schema.empty()) {
-		schema = DEFAULT_SCHEMA;
-	}
-	auto &path = args[3];
+	return args;
+}
+
+// Reads the file, defines the view in the glue (an error if the file does not compile), attaches
+// its OneLake lakehouses and frames it. db and schema '' are the session's.
+static DefinedView DefineView(ClientContext &context, DaxSqlState &state, const vector<string> &args) {
+	DefinedView v;
+	v.db = args[0];
+	v.schema = args[1];
+	v.name = args[2];
+	v.path = args[3];
 	auto &mode = args[4];
-	auto text = ReadModel(context, path);
-	auto outcome = StringUtil::Split(state.js.Call("define", {db, schema, name, path, text, mode}), '\n');
+	if (v.db.empty()) {
+		v.db = DatabaseManager::GetDefaultDatabase(context).GetIdentifierName();
+	}
+	if (v.schema.empty()) {
+		v.schema = ClientData::Get(context).catalog_search_path->GetDefault().GetSchema().GetIdentifierName();
+	}
+	if (v.schema.empty()) {
+		v.schema = DEFAULT_SCHEMA;
+	}
+	v.text = ReadModel(context, v.path);
+	auto outcome = StringUtil::Split(state.js.Call("define", {v.db, v.schema, v.name, v.path, v.text, mode}), '\n');
 	state.RefreshNames();
 	if (outcome.size() > 1) {
 		Connection con(*context.db);
 		// Not attached: the view reads its tables from the search path (a copy of the lakehouse).
 		auto error = AttachOneLake(con, &context, outcome);
 		if (!error.empty()) {
-			state.js.Call("localize", {name, error});
+			state.js.Call("localize", {v.name, error});
 		} else {
-			FrameView(con, state, name);
+			FrameView(con, state, v.name);
 		}
 	}
+	v.created = !outcome.empty() && outcome[0] == "created";
+	return v;
+}
 
+static string Quoted(const string &name) {
+	return KeywordHelper::WriteQuoted(name, '"');
+}
+
+// A statement of the extension's own, in a connection of its own; its error is thrown.
+static void Run(Connection &con, const string &sql) {
+	auto result = con.Query(sql);
+	if (result->HasError()) {
+		result->ThrowError();
+	}
+}
+
+// The view's row in its schema's dax_sql_semantic_views, where a database file keeps it: the
+// file's text, so the view comes back when the file is opened (RestoreViews).
+static void StoreView(DatabaseInstance &db, const DefinedView &v) {
+	Framing guard;
+	Connection con(db);
+	auto table = Quoted(v.db) + "." + Quoted(v.schema) + ".dax_sql_semantic_views";
+	Run(con, "CREATE TABLE IF NOT EXISTS " + table +
+	             " (view_name VARCHAR, path VARCHAR, definition VARCHAR, created_on TIMESTAMP)");
+	Run(con, "DELETE FROM " + table + " WHERE lower(view_name) = lower(" + KeywordHelper::WriteQuoted(v.name) + ")");
+	auto insert = con.Prepare("INSERT INTO " + table + " VALUES ($1, $2, $3, $4)");
+	if (insert->HasError()) {
+		insert->error.Throw();
+	}
+	vector<Value> values {Value(v.name), Value(v.path), Value(v.text),
+	                      Value::TIMESTAMP(Timestamp::GetCurrentTimestamp())};
+	auto result = insert->Execute(values, false);
+	if (result->HasError()) {
+		result->ThrowError();
+	}
+}
+
+// dax_sql_create(db, schema, name, path, mode): what CREATE SEMANTIC VIEW is (dax_sql_grammar.cpp).
+// mode: 'create', 'replace' or 'if_not_exists'. One row, the view and its frame; none when IF NOT
+// EXISTS finds it.
+static unique_ptr<FunctionData> CreateBind(ClientContext &context, TableFunctionBindInput &input,
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto &state = *input.info->Cast<DaxSqlFunctionInfo>().state;
+	auto v = DefineView(context, state, StringArgs(input, "dax_sql_create"));
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
+	names = {"view_name", "data_as_of"};
+	auto data = make_uniq<DefineData>();
+	if (v.created) {
+		StoreView(*context.db, v);
+		data->rows.push_back({Value(v.name), Value(state.js.Call("data_as_of", {v.name}))});
+	}
+	return std::move(data);
+}
+
+// dax_sql_drop(db, schema, name, if_exists): what DROP SEMANTIC VIEW is. The view forgotten and its
+// stored row deleted; one row, the view, or none when IF EXISTS finds none.
+static unique_ptr<FunctionData> DropBind(ClientContext &context, TableFunctionBindInput &input,
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto &state = *input.info->Cast<DaxSqlFunctionInfo>().state;
+	auto args = StringArgs(input, "dax_sql_drop");
+	auto dropped = state.js.Call("forget", {args[2], args[3]});
+	state.RefreshNames();
+	return_types = {LogicalType::VARCHAR};
+	names = {"view_name"};
+	auto data = make_uniq<DefineData>();
+	if (!dropped.empty()) {
+		auto parts = StringUtil::Split(dropped, '\t');
+		if (parts.size() == 3) {
+			Framing guard;
+			Connection con(*context.db);
+			// a view kept nowhere (its database read-only, say) has no row to delete
+			con.Query("DELETE FROM " + Quoted(parts[0]) + "." + Quoted(parts[1]) +
+			          ".dax_sql_semantic_views WHERE lower(view_name) = lower(" + KeywordHelper::WriteQuoted(parts[2]) +
+			          ")");
+			data->rows.push_back({Value(parts[2])});
+		}
+	}
+	return std::move(data);
+}
+
+// dax_sql_show(kind, view, metric): what SHOW SEMANTIC VIEWS / DIMENSIONS / METRICS is, as a
+// statement or as a table. The glue lists the rows as a SELECT over VALUES, run here.
+static unique_ptr<FunctionData> ShowBind(ClientContext &context, TableFunctionBindInput &input,
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto &state = *input.info->Cast<DaxSqlFunctionInfo>().state;
+	auto args = StringArgs(input, "dax_sql_show");
+	auto sql = state.js.Call("show", {args[0], args[1], args[2]});
+	Framing guard;
+	Connection con(*context.db);
+	auto result = con.Query(sql);
+	if (result->HasError()) {
+		result->ThrowError();
+	}
+	return_types = result->types;
+	for (auto &name : result->names) {
+		names.emplace_back(name);
+	}
+	auto data = make_uniq<DefineData>();
+	auto &collection = result->Collection();
+	for (auto &chunk : collection.Chunks()) {
+		for (idx_t r = 0; r < chunk.size(); r++) {
+			vector<Value> values;
+			for (idx_t c = 0; c < chunk.ColumnCount(); c++) {
+				values.push_back(chunk.GetValue(c, r));
+			}
+			data->rows.push_back(std::move(values));
+		}
+	}
+	return std::move(data);
+}
+
+// dax_sql_define(db, schema, name, path, mode): the view defined, and the row to store for it (none
+// when IF NOT EXISTS finds it). What dax_sql_rewrite() shows CREATE SEMANTIC VIEW as.
+static unique_ptr<FunctionData> DefineBind(ClientContext &context, TableFunctionBindInput &input,
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto &state = *input.info->Cast<DaxSqlFunctionInfo>().state;
+	auto v = DefineView(context, state, StringArgs(input, "dax_sql_define"));
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::TIMESTAMP};
 	names = {"view_name", "path", "definition", "created_on"};
 	auto data = make_uniq<DefineData>();
-	data->emit = !outcome.empty() && outcome[0] == "created";
-	data->row = {Value(name), Value(path), Value(text), Value::TIMESTAMP(Timestamp::GetCurrentTimestamp())};
+	if (v.created) {
+		data->rows.push_back(
+		    {Value(v.name), Value(v.path), Value(v.text), Value::TIMESTAMP(Timestamp::GetCurrentTimestamp())});
+	}
 	return std::move(data);
 }
 
@@ -541,18 +756,19 @@ static unique_ptr<GlobalTableFunctionState> DefineInit(ClientContext &context, T
 static void DefineFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
 	auto &data = input.bind_data->Cast<DefineData>();
 	auto &state = input.global_state->Cast<DefineState>();
-	if (state.done || !data.emit) {
-		return;
+	idx_t count = 0;
+	while (state.offset < data.rows.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &row = data.rows[state.offset++];
+		for (idx_t c = 0; c < row.size(); c++) {
+			output.SetValue(c, count, row[c]);
+		}
+		count++;
 	}
-	for (idx_t c = 0; c < data.row.size(); c++) {
-		output.SetValue(c, 0, data.row[c]);
-	}
-	output.SetCardinality(1);
-	state.done = true;
+	output.SetCardinality(count);
 }
 
 //===--------------------------------------------------------------------===//
-// Load: the views stored in the databases attached now, then the parser override.
+// Load: the views stored in the databases attached now, then the grammar and the rebind hook.
 //===--------------------------------------------------------------------===//
 // The rows of a query, as text; none when it fails.
 static vector<vector<string>> QueryRows(Connection &con, const string &sql) {
@@ -602,8 +818,9 @@ static void RestoreViews(DatabaseInstance &db, DaxSqlState &state) {
 	state.RefreshNames();
 }
 
-// dax_sql_rewrite(sql): the SQL DuckDB runs for a text, as the parser override rewrites it, without
-// running it or changing a view; the text itself when nothing in it is the extension's.
+// dax_sql_rewrite(sql): the SQL a text stands for, its model queries compiled in place and the
+// extension's statements as the SQL they are, without running it or changing a view; the text
+// itself when nothing in it is the extension's. For the drift check and for reading.
 static scalar_function_t RewriteFunction(shared_ptr<DaxSqlState> state) {
 	return [state](DataChunk &args, ExpressionState &expr, Vector &result) {
 		UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(), [&](string_t sql) {
@@ -657,6 +874,21 @@ static void LoadInternal(ExtensionLoader &loader) {
 	TableFunction refresh("dax_sql_refresh", {LogicalType::VARCHAR}, DefineFunction, RefreshBind, DefineInit);
 	refresh.function_info = make_shared_ptr<DaxSqlFunctionInfo>(state);
 	loader.RegisterFunction(refresh);
+	TableFunction create(
+	    "dax_sql_create",
+	    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	    DefineFunction, CreateBind, DefineInit);
+	create.function_info = make_shared_ptr<DaxSqlFunctionInfo>(state);
+	loader.RegisterFunction(create);
+	TableFunction drop("dax_sql_drop",
+	                   {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN},
+	                   DefineFunction, DropBind, DefineInit);
+	drop.function_info = make_shared_ptr<DaxSqlFunctionInfo>(state);
+	loader.RegisterFunction(drop);
+	TableFunction show("dax_sql_show", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                   DefineFunction, ShowBind, DefineInit);
+	show.function_info = make_shared_ptr<DaxSqlFunctionInfo>(state);
+	loader.RegisterFunction(show);
 	ScalarFunction facts("dax_sql_facts", {LogicalType::VARCHAR}, LogicalType::VARCHAR, FactsFunction(state));
 	facts.SetVolatile();
 	loader.RegisterFunction(facts);
@@ -672,12 +904,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	RestoreViews(db, *state);
 
-	auto &config = DBConfig::GetConfig(db);
-	ParserExtension parser;
-	parser.parser_override = DaxSqlParserOverride;
-	parser.parser_info = make_shared_ptr<DaxSqlParserInfo>(state);
-	ParserExtension::Register(config, parser);
-	config.SetOptionByName("allow_parser_override_extension", Value("FALLBACK"));
+	// The statements: grammar rules (dax_sql_grammar.cpp). The model queries: compiled when they fail
+	// to bind, on every connection, those open now and those opened later.
+	RegisterDaxSqlGrammar(db);
+	ExtensionCallback::Register(DBConfig::GetConfig(db), make_shared_ptr<DaxSqlConnectionCallback>(state));
+	for (auto &connection : db.GetConnectionManager().GetConnectionList()) {
+		connection->registered_state->GetOrCreate<DaxSqlRebindState>(DaxSqlRebindState::KEY, state);
+	}
 }
 
 void DaxSqlExtension::Load(ExtensionLoader &loader) {

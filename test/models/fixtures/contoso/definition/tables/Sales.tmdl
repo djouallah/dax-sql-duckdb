@@ -1,0 +1,68 @@
+table Sales
+
+	column OrderDate
+		dataType: dateTime
+		sourceColumn: OrderDate
+
+	column ShipDate
+		dataType: dateTime
+		sourceColumn: ShipDate
+
+	column ProductKey
+		dataType: int64
+		sourceColumn: ProductKey
+
+	column CustomerKey
+		dataType: int64
+		sourceColumn: CustomerKey
+
+	column Qty
+		dataType: int64
+		sourceColumn: Qty
+
+	column Amount
+		dataType: decimal
+		sourceColumn: Amount
+
+	column LineValue = Sales[Qty] * RELATED(Product[Price])
+		dataType: double
+
+	measure 'Sales Amount' = SUM(Sales[Amount])
+
+	measure Quantity = SUM(Sales[Qty])
+
+	measure Orders = COUNTROWS(Sales)
+
+	measure Customers = DISTINCTCOUNT(Sales[CustomerKey])
+
+	measure 'All Sales' = CALCULATE([Sales Amount], ALL(Sales))
+
+	measure 'Red Sales' = CALCULATE([Sales Amount], Product[Color] = "Red")
+
+	measure 'Red Sales Kept' = CALCULATE([Sales Amount], KEEPFILTERS(Product[Color] = "Red"))
+
+	measure 'Share of Category' = DIVIDE([Sales Amount], CALCULATE([Sales Amount], ALLEXCEPT(Product, Category[Category])))
+
+	measure 'Sales by Ship Date' = CALCULATE([Sales Amount], USERELATIONSHIP(Sales[ShipDate], 'Date'[Date]))
+
+	measure 'Sales YTD' = TOTALYTD([Sales Amount], 'Date'[Date])
+
+	measure 'Sales PY' = CALCULATE([Sales Amount], SAMEPERIODLASTYEAR('Date'[Date]))
+
+	measure 'Big Orders' = CALCULATE([Orders], FILTER(Sales, Sales[Amount] > 100))
+
+	measure 'Best Customer Sales' = MAXX(VALUES(Customer[Customer]), [Sales Amount])
+
+	measure 'Products Sold' = COUNTROWS(FILTER(Product, [Sales Amount] > 0))
+
+	measure 'Line Value' = SUMX(Sales, Sales[Qty] * RELATED(Product[Price]))
+
+	measure 'Line Value Column' = SUM(Sales[LineValue])
+
+	measure 'Return Rate' = DIVIDE([Returned], [Quantity])
+
+	partition Sales = entity
+
+		source
+			entityName: Sales
+

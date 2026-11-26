@@ -1,0 +1,39 @@
+relationship sales_product
+	fromColumn: Sales.ProductKey
+	toColumn: Product.ProductKey
+
+relationship product_category
+	fromColumn: Product.CategoryKey
+	toColumn: Category.CategoryKey
+
+relationship sales_customer
+	fromColumn: Sales.CustomerKey
+	toColumn: Customer.CustomerKey
+
+relationship sales_orderdate
+	fromColumn: Sales.OrderDate
+	toColumn: Date.Date
+
+relationship sales_shipdate
+	fromColumn: Sales.ShipDate
+	toColumn: Date.Date
+	isActive: false
+
+relationship returns_product
+	fromColumn: Returns.ProductKey
+	toColumn: Product.ProductKey
+
+relationship returns_date
+	fromColumn: Returns.Date
+	toColumn: Date.Date
+
+relationship target_city
+	fromColumn: CityTarget.City
+	toColumn: Customer.City
+	fromCardinality: many
+	toCardinality: many
+
+relationship sales_big
+	fromColumn: Sales.ProductKey
+	toColumn: 'Big Products'.ProductKey
+

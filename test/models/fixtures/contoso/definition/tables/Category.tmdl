@@ -1,0 +1,16 @@
+table Category
+
+	column CategoryKey
+		dataType: int64
+		sourceColumn: CategoryKey
+		isKey
+
+	column Category
+		dataType: string
+		sourceColumn: Category
+
+	partition Category = entity
+
+		source
+			entityName: Category
+

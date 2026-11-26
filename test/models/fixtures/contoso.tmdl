@@ -1,0 +1,415 @@
+createOrReplace
+
+	database contoso
+		compatibilityLevel: 1604
+
+		model Model
+			culture: en-US
+
+			table Category
+
+				column CategoryKey
+					dataType: int64
+					sourceColumn: CategoryKey
+					isKey
+
+				column Category
+					dataType: string
+					sourceColumn: Category
+
+				partition Category = entity
+
+					source
+						entityName: Category
+
+			table Product
+
+				column ProductKey
+					dataType: int64
+					sourceColumn: ProductKey
+					isKey
+
+				column Name
+					dataType: string
+					sourceColumn: Name
+
+				column Color
+					dataType: string
+					sourceColumn: Color
+
+				column CategoryKey
+					dataType: int64
+					sourceColumn: CategoryKey
+
+				column Price
+					dataType: double
+					sourceColumn: Price
+
+				column PriceBand = IF(Product[Price] >= 100, "High", "Low")
+					dataType: string
+
+				measure 'Avg Price' = AVERAGE(Product[Price])
+
+				measure 'Product Count' = COUNTROWS(Product)
+
+				partition Product = entity
+
+					source
+						entityName: Product
+
+			table Customer
+
+				column CustomerKey
+					dataType: int64
+					sourceColumn: CustomerKey
+					isKey
+
+				column Customer
+					dataType: string
+					sourceColumn: Customer
+
+				column City
+					dataType: string
+					sourceColumn: City
+
+				column Flag = 1
+					dataType: int64
+
+				column 'Total Sales' = CALCULATE(SUM(Sales[Amount]))
+					dataType: double
+
+				partition Customer = entity
+
+					source
+						entityName: Customer
+
+			table Date
+				dataCategory: Time
+
+				column Date
+					dataType: dateTime
+					sourceColumn: Date
+					isKey
+
+				column Year
+					dataType: int64
+					sourceColumn: Year
+
+				column Month
+					dataType: int64
+					sourceColumn: Month
+
+				column Quarter
+					dataType: int64
+					sourceColumn: Quarter
+
+				partition Date = entity
+
+					source
+						entityName: Date
+
+			table Sales
+
+				column OrderDate
+					dataType: dateTime
+					sourceColumn: OrderDate
+
+				column ShipDate
+					dataType: dateTime
+					sourceColumn: ShipDate
+
+				column ProductKey
+					dataType: int64
+					sourceColumn: ProductKey
+
+				column CustomerKey
+					dataType: int64
+					sourceColumn: CustomerKey
+
+				column Qty
+					dataType: int64
+					sourceColumn: Qty
+
+				column Amount
+					dataType: decimal
+					sourceColumn: Amount
+
+				column LineValue = Sales[Qty] * RELATED(Product[Price])
+					dataType: double
+
+				measure 'Sales Amount' = SUM(Sales[Amount])
+
+				measure Quantity = SUM(Sales[Qty])
+
+				measure Orders = COUNTROWS(Sales)
+
+				measure Customers = DISTINCTCOUNT(Sales[CustomerKey])
+
+				measure 'All Sales' = CALCULATE([Sales Amount], ALL(Sales))
+
+				measure 'Red Sales' = CALCULATE([Sales Amount], Product[Color] = "Red")
+
+				measure 'Red Sales Kept' = CALCULATE([Sales Amount], KEEPFILTERS(Product[Color] = "Red"))
+
+				measure 'Share of Category' = DIVIDE([Sales Amount], CALCULATE([Sales Amount], ALLEXCEPT(Product, Category[Category])))
+
+				measure 'Sales by Ship Date' = CALCULATE([Sales Amount], USERELATIONSHIP(Sales[ShipDate], 'Date'[Date]))
+
+				measure 'Sales YTD' = TOTALYTD([Sales Amount], 'Date'[Date])
+
+				measure 'Sales PY' = CALCULATE([Sales Amount], SAMEPERIODLASTYEAR('Date'[Date]))
+
+				measure 'Big Orders' = CALCULATE([Orders], FILTER(Sales, Sales[Amount] > 100))
+
+				measure 'Best Customer Sales' = MAXX(VALUES(Customer[Customer]), [Sales Amount])
+
+				measure 'Products Sold' = COUNTROWS(FILTER(Product, [Sales Amount] > 0))
+
+				measure 'Line Value' = SUMX(Sales, Sales[Qty] * RELATED(Product[Price]))
+
+				measure 'Line Value Column' = SUM(Sales[LineValue])
+
+				measure 'Return Rate' = DIVIDE([Returned], [Quantity])
+
+				partition Sales = entity
+
+					source
+						entityName: Sales
+
+			table Returns
+
+				column Date
+					dataType: dateTime
+					sourceColumn: Date
+
+				column ProductKey
+					dataType: int64
+					sourceColumn: ProductKey
+
+				column ReturnQty
+					dataType: int64
+					sourceColumn: ReturnQty
+
+				measure Returned = SUM(Returns[ReturnQty])
+
+				partition Returns = entity
+
+					source
+						entityName: Returns
+
+			table CityTarget
+
+				column City
+					dataType: string
+					sourceColumn: City
+
+				column Target
+					dataType: int64
+					sourceColumn: Target
+
+				measure 'Target Total' = SUM(CityTarget[Target])
+
+				partition CityTarget = entity
+
+					source
+						entityName: CityTarget
+
+			table Staff
+
+				column StaffKey
+					dataType: int64
+					sourceColumn: StaffKey
+					isKey
+
+				column Name
+					dataType: string
+					sourceColumn: Name
+
+				column ManagerKey
+					dataType: int64
+					sourceColumn: ManagerKey
+
+				partition Staff = entity
+
+					source
+						entityName: Staff
+
+			table 'Big Products'
+
+				column ProductKey
+					dataType: int64
+					sourceColumn: [ProductKey]
+
+				column Name
+					dataType: string
+					sourceColumn: [Name]
+
+				column Price
+					dataType: double
+					sourceColumn: [Price]
+
+				partition 'Big Products' = calculated
+					source = SELECTCOLUMNS(FILTER(Product, Product[Price] >= 100), "ProductKey", Product[ProductKey], "Name", Product[Name], "Price", Product[Price])
+
+			table Days
+
+				column Date
+					dataType: dateTime
+					sourceColumn: [Date]
+
+				partition Days = calculated
+					source = CALENDARAUTO()
+
+			table 'Time Calc'
+
+				calculationGroup
+					precedence: 10
+
+					calculationItem Current = SELECTEDMEASURE()
+						ordinal: 0
+
+					calculationItem YTD = CALCULATE(SELECTEDMEASURE(), DATESYTD('Date'[Date]))
+						ordinal: 1
+
+					calculationItem PY = CALCULATE(SELECTEDMEASURE(), SAMEPERIODLASTYEAR('Date'[Date]))
+						ordinal: 2
+
+					calculationItem YOY = SELECTEDMEASURE() - CALCULATE(SELECTEDMEASURE(), 'Time Calc'[Time Calc] = "PY")
+						ordinal: 3
+
+					calculationItem Name = SELECTEDMEASURENAME()
+						ordinal: 4
+
+					calculationItem Tenfold = [Sales Amount] * 10
+						ordinal: 5
+
+				column 'Time Calc'
+					dataType: string
+					sourceColumn: Name
+					sortByColumn: Ordinal
+
+				column Ordinal
+					dataType: int64
+					sourceColumn: Ordinal
+
+				partition 'Time Calc Partition' = calculationGroup
+
+			table Scale
+
+				calculationGroup
+					precedence: 20
+
+					calculationItem x2 = SELECTEDMEASURE() * 2
+						ordinal: 0
+
+					calculationItem plus1 = SELECTEDMEASURE() + 1
+						ordinal: 1
+
+				column Scale
+					dataType: string
+					sourceColumn: Name
+					sortByColumn: Ordinal
+
+				column Ordinal
+					dataType: int64
+					sourceColumn: Ordinal
+
+				partition 'Scale Partition' = calculationGroup
+
+			table Fields
+
+				column Fields
+					dataType: string
+					sourceColumn: [Value1]
+
+				column 'Fields Fields'
+					dataType: string
+					sourceColumn: [Value2]
+
+					extendedProperty ParameterMetadata = {"version":3,"kind":2}
+
+				column 'Fields Order'
+					dataType: int64
+					sourceColumn: [Value3]
+
+				partition Fields = calculated
+					source = { ("Sales", NAMEOF('Sales'[Sales Amount]), 0), ("Quantity", NAMEOF('Sales'[Quantity]), 1), ("Color", NAMEOF('Product'[Color]), 2) }
+
+			relationship sales_product
+				fromColumn: Sales.ProductKey
+				toColumn: Product.ProductKey
+
+			relationship product_category
+				fromColumn: Product.CategoryKey
+				toColumn: Category.CategoryKey
+
+			relationship sales_customer
+				fromColumn: Sales.CustomerKey
+				toColumn: Customer.CustomerKey
+
+			relationship sales_orderdate
+				fromColumn: Sales.OrderDate
+				toColumn: Date.Date
+
+			relationship sales_shipdate
+				fromColumn: Sales.ShipDate
+				toColumn: Date.Date
+				isActive: false
+
+			relationship returns_product
+				fromColumn: Returns.ProductKey
+				toColumn: Product.ProductKey
+
+			relationship returns_date
+				fromColumn: Returns.Date
+				toColumn: Date.Date
+
+			relationship target_city
+				fromColumn: CityTarget.City
+				toColumn: Customer.City
+				fromCardinality: many
+				toCardinality: many
+
+			relationship sales_big
+				fromColumn: Sales.ProductKey
+				toColumn: 'Big Products'.ProductKey
+
+			role Paris
+				modelPermission: read
+
+				tablePermission Customer = Customer[City] = "Paris"
+
+			role RedOnly
+				modelPermission: read
+
+				tablePermission Product = Product[Color] = "Red"
+
+			role Me
+				modelPermission: read
+
+				tablePermission Customer = Customer[Customer] = USERPRINCIPALNAME()
+
+			role NoPrice
+				modelPermission: read
+
+				tablePermission Product
+
+					columnPermission Price
+						metadataPermission: none
+
+			role NoReturns
+				modelPermission: read
+
+				tablePermission Returns
+					metadataPermission: none
+
+			role ParisNoPrice
+				modelPermission: read
+
+				tablePermission Customer = Customer[City] = "Paris"
+
+				tablePermission Product
+
+					columnPermission Price
+						metadataPermission: none
+

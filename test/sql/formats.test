@@ -28,10 +28,10 @@ statement ok
 CREATE SEMANTIC VIEW contoso FROM 'third_party/dax-sql/conformance/models/contoso/model.bim';
 
 statement ok
-CREATE SEMANTIC VIEW contoso_file FROM 'test/models/generated/contoso.tmdl';
+CREATE SEMANTIC VIEW contoso_file FROM 'test/models/fixtures/contoso.tmdl';
 
 statement ok
-CREATE SEMANTIC VIEW contoso_dir FROM 'test/models/generated/contoso/definition';
+CREATE SEMANTIC VIEW contoso_dir FROM 'test/models/fixtures/contoso/definition';
 
 query I
 SELECT view_name FROM (SHOW SEMANTIC VIEWS) ORDER BY ALL;
@@ -181,7 +181,7 @@ true	0	0
 # merges them on publish: the same model, so the same rows as the one file.
 
 statement ok
-CREATE SEMANTIC VIEW aac_folder FROM 'test/models/generated/aac_ossie';
+CREATE SEMANTIC VIEW aac_folder FROM 'test/models/fixtures/aac_ossie';
 
 query II
 SELECT (SELECT count(*) FROM (SHOW SEMANTIC METRICS IN aac_folder)) = (SELECT count(*) FROM (SHOW SEMANTIC METRICS IN aac_ossie)),
@@ -245,21 +245,21 @@ no_such_model.tmdl
 statement error
 CREATE SEMANTIC VIEW wrong FROM 'test/cli';
 
-# a folder of Ossie files that define a dataset twice (test/models/generated/aac_ossie_twice: the
+# a folder of Ossie files that define a dataset twice (test/models/fixtures/aac_ossie_twice: the
 # folder above, with its first datasets file once more)
 statement error
-CREATE SEMANTIC VIEW wrong FROM 'test/models/generated/aac_ossie_twice';
+CREATE SEMANTIC VIEW wrong FROM 'test/models/fixtures/aac_ossie_twice';
 ----
 is in datasets/dimensions.yaml and extra.yaml
 
 # a folder of Ossie files whose descriptions differ
 statement error
-CREATE SEMANTIC VIEW wrong FROM 'test/models/generated/aac_ossie_descriptions';
+CREATE SEMANTIC VIEW wrong FROM 'test/models/fixtures/aac_ossie_descriptions';
 ----
 its description differs from another file's
 
 # a folder of Ossie files, one without its name
 statement error
-CREATE SEMANTIC VIEW wrong FROM 'test/models/generated/aac_ossie_unnamed';
+CREATE SEMANTIC VIEW wrong FROM 'test/models/fixtures/aac_ossie_unnamed';
 ----
 has no name

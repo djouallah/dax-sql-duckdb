@@ -1,0 +1,9 @@
+table Days
+
+	column Date
+		dataType: dateTime
+		sourceColumn: [Date]
+
+	partition Days = calculated
+		source = CALENDARAUTO()
+

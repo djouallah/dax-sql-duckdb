@@ -84,8 +84,10 @@ named `<name>`, in the current schema or the one named.
 A **model query** is a `SELECT` whose only `FROM` is a semantic view, with or without an
 alias. It is the SQL the compiler takes today (DESIGN.md, Reference, SQL):
 
-- `AGG(m)` or `MEASURE(m)` is measure `m`. `SUM`, `AVG`, `MIN`, `MAX` and `COUNT` aggregate a
-  column.
+- `AGG(m)` is measure `m`, and the only way to name one: `AGG(Orders)`, or
+  `AGG("Sales Amount")` for a name SQL quotes. A measure's name is unique in its model (as in
+  any Tabular model, whatever its case), so it needs no table. `SUM`, `AVG`, `MIN`, `MAX` and
+  `COUNT` aggregate a column.
 - The columns in the select list are the groups. They appear in `GROUP BY`, or `GROUP BY ALL`
   takes them from the select list. `ROLLUP` adds subtotals.
 - `WHERE` filters on columns only, and `HAVING` filters on aggregates.
@@ -103,10 +105,9 @@ These are errors, each with a message that says what to write instead:
 - **Window functions and `QUALIFY` in a model query:** apply them to the result, outside it.
 - **Grouping by a measure, or a bare measure without `AGG`.**
 
-Names work as in the compiler's SQL. A bare name is enough when one table has it; otherwise
-write `table.column`. A name with spaces takes double quotes. `[Sales Amount]` and
-`'Product'[Color]` work too: the extension rewrites the text before DuckDB parses it, so
-DuckDB never sees them.
+Names are SQL's. A bare column name is enough when one table has it; otherwise write
+`table.column`. A name with spaces takes double quotes. A model query is plain DuckDB SQL:
+the only DAX is in the model's file, its measures' expressions.
 
 ### Composing
 
@@ -154,19 +155,22 @@ The extension is written in C++ and has three parts.
    the text in a table of its schema. An in-memory registry holds each view's compiler, filled
    on `CREATE` and, for views stored earlier, when a connection opens.
 2. **The statements.**
-   - **`CREATE`, `DROP` and `SHOW`:** DuckDB cannot parse `CREATE SEMANTIC VIEW`,
-     `DROP SEMANTIC VIEW` or `SHOW SEMANTIC …`. Its parser extension's fallback, on by
-     default, takes them, and each runs as a table function that does the work or returns
-     the rows.
-   - **Model queries:** a model query parses as DuckDB SQL but cannot bind. So the extension
-     sets `allow_parser_override_extension` to `FALLBACK` when it loads, and its parser
-     override sees each statement's text first. One that names no semantic view is left to
-     DuckDB's parser. One that does is passed to dax-sql's `compileStatement(text, name)`,
-     once per view it names. That finds each model query (its scanner skips strings, quoted
-     names, `$$` strings and comments), compiles it, and puts the SQL in its place. DuckDB
-     then parses that SQL, and binds, optimises and runs the whole statement as one query.
-     Filters and column choices push down into the compiled SQL, and the result streams.
-     The extension does not walk DuckDB's parse tree.
+   - **`CREATE`, `DROP`, `REFRESH` and `SHOW SEMANTIC …`** are rules of a grammar extension of
+     DuckDB's PEG parser (`src/dax_sql_grammar.cpp`), active on every connection: the
+     connections opened after `LOAD` at once, the one that ran `LOAD` once that statement ends
+     (so `LOAD` and a `CREATE SEMANTIC VIEW` are two statements, not one string). Each is
+     lowered to a call of the extension's table functions, `SELECT * FROM dax_sql_create(…)`,
+     `dax_sql_drop`, `dax_sql_refresh`, `dax_sql_show`, which do the work or return the rows.
+     `(SHOW SEMANTIC …)` is a table wherever DuckDB takes one. The grammar's plumbing follows
+     the `semantic_layer` community extension's (`THIRD_PARTY_NOTICES.md`).
+   - **Model queries** are plain SQL: DuckDB parses them, and binding fails on the view's name.
+     On that error (`OnPlanningError`, a hook on every connection) the statement's own text
+     goes to dax-sql's `compileStatement(text, name)`, once per view it names. That finds each
+     model query (its scanner skips strings, quoted names, `$$` strings and comments), compiles
+     it, and puts the SQL in its place. The extension parses what comes back, puts its body in
+     the statement's place, and DuckDB binds, optimises and runs the whole statement as one
+     query. Filters and column choices push down into the compiled SQL, and the result
+     streams. `DESCRIBE sales` goes the same way, as its rows. There is no parser override.
    - **Errors:** the compiler's errors (`SYNTAX`, `SEMANTIC`, `UNSUPPORTED`) become DuckDB
      errors that keep its message.
 3. **The compiler, unchanged.** `src/` and the readers in `formats/` (with `yaml` 2.8.1, the
@@ -308,7 +312,7 @@ The extension is built for `wasm_eh`, and it works in DuckDB-Wasm. CI's `wasm` j
 (`test/wasm/probe.js`) loads it in headless Chromium and checks, item by item:
 
 - **What works:**
-  - `LOAD`, and the parser override, which the extension turns on (`FALLBACK`);
+  - `LOAD`, and the grammar and the rebind hook on the page's connection;
   - `CREATE SEMANTIC VIEW` from a `.bim` over HTTP;
   - model queries on their own and inside a CTE, `DESCRIBE`, `SHOW SEMANTIC METRICS` and
     `dax_sql_rewrite()`;
@@ -363,9 +367,12 @@ The extension is built for `wasm_eh`, and it works in DuckDB-Wasm. CI's `wasm` j
   `FROM semantic_view('sales', dimensions := [...], metrics := [...])`. Another semantic-layer
   extension for DuckDB works this way. Here the compiler already speaks `SELECT … GROUP BY`,
   so the query form is SQL's own, and there is one way to write a query.
-- **Walking DuckDB's parse tree,** or rewriting after binding. `compileStatement` already finds
-  the model queries in the text. Printing DuckDB's tree back to SQL would add a second
-  printer to keep right, and `AGG(m)` does not bind.
+- **Printing DuckDB's parse tree back to SQL** for the compiler. `compileStatement` already finds
+  the model queries in the statement's own text, which DuckDB keeps, so no second printer is
+  needed.
+- **A parser override** (`allow_parser_override_extension`), which the first build used: it saw
+  every statement's text first, and needed the global `FALLBACK` setting. The grammar and the
+  rebind hook need neither.
 - **DuckDB's C extension API.** It is stable across DuckDB versions, but it has no hook for
   the parser. That exists only in DuckDB's C++ API, so the extension is built for one DuckDB
   2.x release at a time.
@@ -384,15 +391,12 @@ The extension is built for `wasm_eh`, and it works in DuckDB-Wasm. CI's `wasm` j
 
 Each one is settled by a first, small build, before the rest is written.
 
-- **The parser override from `LOAD`.** Check that setting `allow_parser_override_extension`
-  to `FALLBACK` from the extension's load reaches every connection, also those opened before
-  `LOAD`, and that it works the same in the `wasm_eh` build.
 - **Which role applies.** The roles are in the `.bim`, but DuckDB has no signed-in user to
   match against their members. Until that is settled, queries run without row-level security.
 - **Long sessions on OneLake.** A token lasts about an hour. Check that a `credential_chain`
   secret refreshes it for the attached catalog, and what a query sees when it has expired.
-- **Views.** The parser override rewrites the text before DuckDB parses it, so `CREATE VIEW`
-  over a model query would store the compiled SQL, not the user's. Check whether the user's
+- **Views.** The rebind puts the compiled SQL in the statement's place, so `CREATE VIEW` over a
+  model query stores the compiled SQL, not the user's. Check whether the user's
   text can be kept, so a view follows `CREATE OR REPLACE SEMANTIC VIEW`.
 - **Following DuckDB releases.** The floor is DuckDB 2.0. Find out how much the C++ API the
   extension uses changes between 2.x releases, and so how each new release is picked up.

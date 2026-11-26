@@ -1,0 +1,17 @@
+table 'Big Products'
+
+	column ProductKey
+		dataType: int64
+		sourceColumn: [ProductKey]
+
+	column Name
+		dataType: string
+		sourceColumn: [Name]
+
+	column Price
+		dataType: double
+		sourceColumn: [Price]
+
+	partition 'Big Products' = calculated
+		source = SELECTCOLUMNS(FILTER(Product, Product[Price] >= 100), "ProductKey", Product[ProductKey], "Name", Product[Name], "Price", Product[Price])
+

@@ -1,0 +1,8 @@
+role NoPrice
+	modelPermission: read
+
+	tablePermission Product
+
+		columnPermission Price
+			metadataPermission: none
+

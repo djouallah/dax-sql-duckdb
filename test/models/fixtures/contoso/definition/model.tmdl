@@ -1,0 +1,16 @@
+model Model
+	culture: en-US
+
+ref table Category
+ref table Product
+ref table Customer
+ref table Date
+ref table Sales
+ref table Returns
+ref table CityTarget
+ref table Staff
+ref table 'Big Products'
+ref table Days
+ref table 'Time Calc'
+ref table Scale
+ref table Fields

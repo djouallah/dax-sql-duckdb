@@ -14,7 +14,7 @@ CREATE SEMANTIC VIEW kept_ossie FROM 'third_party/dax-sql/conformance/models/aac
 
 # a folder of TMDL files, stored as its files' texts (test/tools/bim_to_tmdl.mjs writes it in CI)
 statement ok
-CREATE SEMANTIC VIEW kept_tmdl FROM 'test/models/generated/contoso/definition';
+CREATE SEMANTIC VIEW kept_tmdl FROM 'test/models/fixtures/contoso/definition';
 
 restart
 

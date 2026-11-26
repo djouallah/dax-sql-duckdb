@@ -1,0 +1,424 @@
+version: 0.3.0.dev0
+name: aac
+datasets:
+  - name: dim_interconnector
+    source: dim_interconnector
+    primary_key:
+      - interconnector
+    description: "One row per link between two regions, from AEMO's MMSDM INTERCONNECTOR: what fct_interconnector's id stands for."
+    fields:
+      - name: interconnector
+        expression:
+          sql: interconnector
+        datatype: String
+        description: AEMO's id of the link, as fct_interconnector carries it.
+      - name: from_region
+        expression:
+          sql: from_region
+        datatype: String
+        description: The region a positive flow leaves.
+      - name: to_region
+        expression:
+          sql: to_region
+        datatype: String
+        description: The region a positive flow enters.
+      - name: description
+        expression:
+          sql: description
+        datatype: String
+        description: AEMO's description of the link.
+  - name: fct_curtailment
+    source: fct_curtailment
+    description: Curtailment per semi-scheduled unit (wind and solar farms) and day, up to the newest whole day of the next-day files.
+    fields:
+      - name: DUID
+        expression:
+          sql: DUID
+        datatype: String
+        description: The unit.
+      - name: date
+        expression:
+          sql: '"date"'
+        datatype: Date
+        description: Date of the interval, NEM time (AEST all year).
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: yyyy-MM-dd
+      - name: curtailed_mwh
+        expression:
+          sql: curtailed_mwh
+        datatype: Decimal
+        description: "What the unit could have made and was not dispatched for: sum of max(availability - target, 0) / 12."
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0.00"
+      - name: available_mwh
+        expression:
+          sql: available_mwh
+        datatype: Decimal
+        description: What the unit could have made.
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0.00"
+    metrics:
+      - name: Curtailed MWh
+        expression:
+          sql: SUM(curtailed_mwh)
+        description: Energy semi-scheduled wind and solar farms could have made and were not dispatched for.
+        datatype: Decimal
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0"
+      - name: Available MWh
+        expression:
+          sql: SUM(available_mwh)
+        description: Energy those farms could have made.
+        datatype: Decimal
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0"
+      - name: Curtailment rate
+        expression:
+          sql: CAST(100 * SUM(curtailed_mwh) AS DOUBLE) / NULLIF(SUM(available_mwh), 0)
+        description: Curtailed energy over available energy, %.
+        datatype: Float
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "0.0"
+  - name: fct_curtailment_region
+    source: fct_curtailment_region
+    description: "Curtailment per region, day and fuel (Wind, Solar): the semi-scheduled farms (fct_curtailment) added up to their newest day, AEMO's regional figures after it (source). What the curtailment chart reads when no unit is picked."
+    fields:
+      - name: REGIONID
+        expression:
+          sql: REGIONID
+        datatype: String
+        description: NEM region.
+      - name: date
+        expression:
+          sql: '"date"'
+        datatype: Date
+        description: Date, NEM time (AEST all year).
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: yyyy-MM-dd
+      - name: fuel
+        expression:
+          sql: fuel
+        datatype: String
+        description: Wind or Solar.
+      - name: curtailed_mwh
+        expression:
+          sql: curtailed_mwh
+        datatype: Decimal
+        description: Energy available and not dispatched.
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0.00"
+      - name: available_mwh
+        expression:
+          sql: available_mwh
+        datatype: Decimal
+        description: Energy available.
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0.00"
+      - name: source
+        expression:
+          sql: source
+        datatype: String
+        description: farms (the units' next-day data, added up) or aemo (AEMO's regional figures, the days after the farms' newest).
+    metrics:
+      - name: Wind and solar curtailed MWh
+        expression:
+          sql: SUM(curtailed_mwh)
+        description: "Energy the semi-scheduled wind and solar farms could have made and were not dispatched for: the farms' own figures to their newest day, AEMO's regional ones after."
+        datatype: Decimal
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0"
+      - name: Wind and solar available MWh
+        expression:
+          sql: SUM(available_mwh)
+        description: Energy those farms could have made, from the same sources.
+        datatype: Decimal
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0"
+      - name: Wind and solar curtailment rate
+        expression:
+          sql: CAST(100 * SUM(curtailed_mwh) AS DOUBLE) / NULLIF(SUM(available_mwh), 0)
+        description: Curtailed energy over available energy, %.
+        datatype: Float
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "0.0"
+  - name: fct_summary_daily
+    source: fct_summary_daily
+    description: "Energy per unit and day: fct_summary one grain up, whole days only (a day is written once the next-day files hold all of it). The measures of fct_summary read this table when no time of day is asked for: output_mwh, charging_mwh and revenue are the day's sums of what they sum at 5 minutes, so the answer is the same. mwh (net) and price (the day's average) are not the same numbers and no measure reads them: they are kept for the dashboard's Analyze tab, which is SQL."
+    fields:
+      - name: DUID
+        expression:
+          sql: DUID
+        datatype: String
+        description: The unit.
+      - name: date
+        expression:
+          sql: '"date"'
+        datatype: Date
+        description: Calendar date, NEM time (AEST all year).
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: yyyy-MM-dd
+      - name: mwh
+        expression:
+          sql: mwh
+        datatype: Decimal
+        description: "The day's net energy, MWh: a battery's charging is taken off its output."
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0.00"
+      - name: price
+        expression:
+          sql: price
+        datatype: Decimal
+        description: The day's average price of the unit's region, $/MWh.
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: $#,##0.00
+      - name: output_mwh
+        expression:
+          sql: output_mwh
+        datatype: Float
+        description: "The day's output, MWh: the 5-minute intervals above 0 MW. What [Generation MWh] sums."
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0.00"
+      - name: charging_mwh
+        expression:
+          sql: charging_mwh
+        datatype: Float
+        description: "The day's charging, MWh, negative: the 5-minute intervals below 0 MW."
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0.00"
+      - name: revenue
+        expression:
+          sql: revenue
+        datatype: Float
+        description: "What the day's output earned, $: each interval's output at its own 5-minute price."
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: $#,##0.00
+    metrics:
+      - name: Average MWh a day
+        expression:
+          sql: AVG(output_mwh)
+        description: A unit's average output per day, MWh, over the whole days it ran in. Names this table, like the measures of the tables by month. Read it per unit.
+        datatype: Float
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0.0"
+  - name: fct_region_daily
+    source: fct_region_daily
+    description: "Price, demand and net interchange per region and day: the plain average of the day's 288 intervals, whole days only. The measures of fct_region read this table when no time of day is asked for; it is also where fct_summary_daily takes its price."
+    fields:
+      - name: REGIONID
+        expression:
+          sql: REGIONID
+        datatype: String
+        description: The region.
+      - name: date
+        expression:
+          sql: '"date"'
+        datatype: Date
+        description: Calendar date, NEM time (AEST all year).
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: yyyy-MM-dd
+      - name: price
+        expression:
+          sql: price
+        datatype: Decimal
+        description: Average regional reference price of the day, $/MWh.
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: $#,##0.00
+      - name: demand
+        expression:
+          sql: demand
+        datatype: Decimal
+        description: Average operational demand of the day, MW.
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0.00"
+      - name: net_interchange
+        expression:
+          sql: net_interchange
+        datatype: Decimal
+        description: Average net flow out of the region, MW; positive is exporting.
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0.00"
+    metrics:
+      - name: Negative price days share
+        expression:
+          dialects:
+            - dialect: DAX
+              expression: 100 * AVERAGEX(fct_region_daily, IF(fct_region_daily[price] < 0, 1, 0))
+        description: "Share of the whole days whose average price was below zero, %. Not [Negative price share], which counts 5-minute intervals: this one names the daily table. Read it per region."
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "0.0"
+      - name: Lowest daily price
+        expression:
+          sql: MIN(price)
+        description: The lowest daily average price in the selection, $/MWh. Names the daily table.
+        datatype: Decimal
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: $#,##0.00
+  - name: dim_month
+    source: dim_month
+    primary_key:
+      - month
+    description: "The whole months the hour-of-day tables hold, with their number of days: the divisor that turns a month's energy at an hour into an average MW."
+    fields:
+      - name: month
+        expression:
+          sql: '"month"'
+        datatype: Date
+        description: The month's first day.
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: yyyy-MM
+      - name: days
+        expression:
+          sql: days
+        datatype: Integer
+        description: Days in the month.
+    metrics:
+      - name: Month days
+        expression:
+          sql: SUM(days)
+        description: Days of the months in the selection.
+        datatype: Integer
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0"
+  - name: fct_summary_hourly
+    source: fct_summary_hourly
+    description: "Output energy per unit, month and hour of day, whole months only: what an average-day chart reads over a long range."
+    fields:
+      - name: DUID
+        expression:
+          sql: DUID
+        datatype: String
+        description: The unit.
+      - name: month
+        expression:
+          sql: '"month"'
+        datatype: Date
+        description: The month's first day.
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: yyyy-MM
+      - name: hour
+        expression:
+          sql: '"hour"'
+        datatype: Integer
+        description: "Hour of day, 0 to 23, as time // 100: the interval ending 14:00 is hour 14."
+      - name: mwh
+        expression:
+          sql: mwh
+        datatype: Decimal
+        description: Output energy at that hour over the month, MWh; charging is left out.
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0.00"
+    metrics:
+      - name: Output MWh hourly
+        expression:
+          sql: SUM(mwh)
+        description: Output energy at an hour of day over the months in the selection.
+        datatype: Decimal
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: "#,##0"
+  - name: fct_region_hourly
+    source: fct_region_hourly
+    description: "Average price per region, month and hour of day, whole months only: what a price-by-hour chart reads over a long range."
+    fields:
+      - name: REGIONID
+        expression:
+          sql: REGIONID
+        datatype: String
+        description: The region.
+      - name: month
+        expression:
+          sql: '"month"'
+        datatype: Date
+        description: The month's first day.
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: yyyy-MM
+      - name: hour
+        expression:
+          sql: '"hour"'
+        datatype: Integer
+        description: "Hour of day, 0 to 23, as time // 100: the interval ending 14:00 is hour 14."
+      - name: price
+        expression:
+          sql: price
+        datatype: Decimal
+        description: Plain average of the month's prices at that hour, $/MWh.
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: $#,##0.00
+      - name: intervals
+        expression:
+          sql: intervals
+        datatype: Integer
+        description: How many intervals were averaged.
+    metrics:
+      - name: Price at hour
+        expression:
+          sql: ROUND(SUM(price * intervals) / NULLIF(SUM(intervals), 0), 4)
+        description: "Average price at an hour of day over the months in the selection: the monthly averages weighted by their intervals."
+        datatype: Decimal
+        nonportable_extensions:
+          - vendor_name: POWER_BI
+            data:
+              formatString: $#,##0.00

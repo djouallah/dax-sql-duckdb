@@ -1,0 +1,35 @@
+table Product
+
+	column ProductKey
+		dataType: int64
+		sourceColumn: ProductKey
+		isKey
+
+	column Name
+		dataType: string
+		sourceColumn: Name
+
+	column Color
+		dataType: string
+		sourceColumn: Color
+
+	column CategoryKey
+		dataType: int64
+		sourceColumn: CategoryKey
+
+	column Price
+		dataType: double
+		sourceColumn: Price
+
+	column PriceBand = IF(Product[Price] >= 100, "High", "Low")
+		dataType: string
+
+	measure 'Avg Price' = AVERAGE(Product[Price])
+
+	measure 'Product Count' = COUNTROWS(Product)
+
+	partition Product = entity
+
+		source
+			entityName: Product
+

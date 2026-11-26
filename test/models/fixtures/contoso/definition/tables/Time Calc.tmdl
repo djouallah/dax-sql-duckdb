@@ -1,0 +1,34 @@
+table 'Time Calc'
+
+	calculationGroup
+		precedence: 10
+
+		calculationItem Current = SELECTEDMEASURE()
+			ordinal: 0
+
+		calculationItem YTD = CALCULATE(SELECTEDMEASURE(), DATESYTD('Date'[Date]))
+			ordinal: 1
+
+		calculationItem PY = CALCULATE(SELECTEDMEASURE(), SAMEPERIODLASTYEAR('Date'[Date]))
+			ordinal: 2
+
+		calculationItem YOY = SELECTEDMEASURE() - CALCULATE(SELECTEDMEASURE(), 'Time Calc'[Time Calc] = "PY")
+			ordinal: 3
+
+		calculationItem Name = SELECTEDMEASURENAME()
+			ordinal: 4
+
+		calculationItem Tenfold = [Sales Amount] * 10
+			ordinal: 5
+
+	column 'Time Calc'
+		dataType: string
+		sourceColumn: Name
+		sortByColumn: Ordinal
+
+	column Ordinal
+		dataType: int64
+		sourceColumn: Ordinal
+
+	partition 'Time Calc Partition' = calculationGroup
+

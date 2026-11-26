@@ -1,0 +1,5 @@
+role Me
+	modelPermission: read
+
+	tablePermission Customer = Customer[Customer] = USERPRINCIPALNAME()
+

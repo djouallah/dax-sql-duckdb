@@ -1,0 +1,13 @@
+version: 0.3.0.dev0
+name: aac
+metrics:
+  - name: Average MW at hour
+    expression:
+      sql: ROUND(AGG(fct_summary_hourly."Output MWh hourly") / NULLIF(AGG(dim_month."Month days"), 0), 4)
+    description: "Average output at an hour of day over the months in the selection, MW: the energy at that hour over the days of those months. Read it per hour."
+    datatype: Decimal
+    nonportable_extensions:
+      - vendor_name: POWER_BI
+        data:
+          formatString: "#,##0"
+          table: fct_summary_hourly

@@ -1,0 +1,169 @@
+version: 0.3.0.dev0
+name: aac
+relationships:
+  - name: fct_summary_to_dim_duid
+    from: fct_summary
+    to: dim_duid
+    from_columns:
+      - DUID
+    to_columns:
+      - DUID
+    nonportable_extensions:
+      - vendor_name: POWER_BI
+        data:
+          relyOnReferentialIntegrity: true
+  - name: fct_summary_to_dim_calendar
+    from: fct_summary
+    to: dim_calendar
+    from_columns:
+      - date
+    to_columns:
+      - date
+    nonportable_extensions:
+      - vendor_name: POWER_BI
+        data:
+          relyOnReferentialIntegrity: true
+  - name: dim_duid_to_dim_region
+    from: dim_duid
+    to: dim_region
+    from_columns:
+      - Region
+    to_columns:
+      - Region
+    nonportable_extensions:
+      - vendor_name: POWER_BI
+        data:
+          crossFilteringBehavior: bothDirections
+  - name: fct_region_to_dim_region
+    from: fct_region
+    to: dim_region
+    from_columns:
+      - REGIONID
+    to_columns:
+      - Region
+  - name: fct_region_to_dim_calendar
+    from: fct_region
+    to: dim_calendar
+    from_columns:
+      - date
+    to_columns:
+      - date
+  - name: fct_interconnector_to_dim_calendar
+    from: fct_interconnector
+    to: dim_calendar
+    from_columns:
+      - date
+    to_columns:
+      - date
+  - name: fct_curtailment_to_dim_duid
+    from: fct_curtailment
+    to: dim_duid
+    from_columns:
+      - DUID
+    to_columns:
+      - DUID
+  - name: fct_curtailment_to_dim_calendar
+    from: fct_curtailment
+    to: dim_calendar
+    from_columns:
+      - date
+    to_columns:
+      - date
+  - name: fct_curtailment_region_to_dim_region
+    from: fct_curtailment_region
+    to: dim_region
+    from_columns:
+      - REGIONID
+    to_columns:
+      - Region
+  - name: fct_curtailment_region_to_dim_calendar
+    from: fct_curtailment_region
+    to: dim_calendar
+    from_columns:
+      - date
+    to_columns:
+      - date
+  - name: fct_summary_to_dim_time
+    from: fct_summary
+    to: dim_time
+    from_columns:
+      - time
+    to_columns:
+      - time
+  - name: fct_region_to_dim_time
+    from: fct_region
+    to: dim_time
+    from_columns:
+      - time
+    to_columns:
+      - time
+  - name: fct_interconnector_to_dim_time
+    from: fct_interconnector
+    to: dim_time
+    from_columns:
+      - time
+    to_columns:
+      - time
+  - name: fct_interconnector_to_dim_interconnector
+    from: fct_interconnector
+    to: dim_interconnector
+    from_columns:
+      - interconnector
+    to_columns:
+      - interconnector
+  - name: fct_summary_daily_to_dim_duid
+    from: fct_summary_daily
+    to: dim_duid
+    from_columns:
+      - DUID
+    to_columns:
+      - DUID
+  - name: fct_summary_daily_to_dim_calendar
+    from: fct_summary_daily
+    to: dim_calendar
+    from_columns:
+      - date
+    to_columns:
+      - date
+  - name: fct_region_daily_to_dim_region
+    from: fct_region_daily
+    to: dim_region
+    from_columns:
+      - REGIONID
+    to_columns:
+      - Region
+  - name: fct_region_daily_to_dim_calendar
+    from: fct_region_daily
+    to: dim_calendar
+    from_columns:
+      - date
+    to_columns:
+      - date
+  - name: fct_summary_hourly_to_dim_duid
+    from: fct_summary_hourly
+    to: dim_duid
+    from_columns:
+      - DUID
+    to_columns:
+      - DUID
+  - name: fct_summary_hourly_to_dim_month
+    from: fct_summary_hourly
+    to: dim_month
+    from_columns:
+      - month
+    to_columns:
+      - month
+  - name: fct_region_hourly_to_dim_region
+    from: fct_region_hourly
+    to: dim_region
+    from_columns:
+      - REGIONID
+    to_columns:
+      - Region
+  - name: fct_region_hourly_to_dim_month
+    from: fct_region_hourly
+    to: dim_month
+    from_columns:
+      - month
+    to_columns:
+      - month

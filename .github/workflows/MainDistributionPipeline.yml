@@ -21,10 +21,13 @@ jobs:
       duckdb_version: v2.0.1
       ci_tools_version: v2.0-cyanoptera
       extension_name: dax_sql
-      # linux_amd64 only, which the Test workflow's integration tests run on, until the repository
-      # variable FULL_CI is 'true': then Windows and wasm_eh (DuckDB-Wasm) too, and the format check.
-      exclude_archs: ${{ vars.FULL_CI == 'true' && 'wasm_mvp;wasm_threads;linux_arm64;linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_arm64;windows_amd64_mingw' || 'wasm_mvp;wasm_threads;wasm_eh;linux_arm64;linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_arm64;windows_amd64;windows_amd64_mingw' }}
-      skip_tests: true
+      # linux_amd64 only, with no tests here (the Test workflow runs them on its binary), until the
+      # repository variable FULL_CI is 'true'. Then as community-extensions builds a submission:
+      # every platform extension-ci-tools builds, and the sqllogictests run in the build, in DuckDB's
+      # own test runner. A platform that cannot build goes in the descriptor's excluded_platforms.
+      # ('none' excludes nothing: an empty string would read as false in the expression.)
+      exclude_archs: ${{ vars.FULL_CI == 'true' && 'none' || 'wasm_mvp;wasm_threads;wasm_eh;linux_arm64;linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_arm64;windows_amd64;windows_amd64_mingw' }}
+      skip_tests: ${{ vars.FULL_CI != 'true' }}
 
   code-quality-check:
     name: Code Quality Check

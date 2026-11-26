@@ -1,0 +1,26 @@
+table Customer
+
+	column CustomerKey
+		dataType: int64
+		sourceColumn: CustomerKey
+		isKey
+
+	column Customer
+		dataType: string
+		sourceColumn: Customer
+
+	column City
+		dataType: string
+		sourceColumn: City
+
+	column Flag = 1
+		dataType: int64
+
+	column 'Total Sales' = CALCULATE(SUM(Sales[Amount]))
+		dataType: double
+
+	partition Customer = entity
+
+		source
+			entityName: Customer
+

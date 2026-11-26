@@ -1,0 +1,19 @@
+table Fields
+
+	column Fields
+		dataType: string
+		sourceColumn: [Value1]
+
+	column 'Fields Fields'
+		dataType: string
+		sourceColumn: [Value2]
+
+		extendedProperty ParameterMetadata = {"version":3,"kind":2}
+
+	column 'Fields Order'
+		dataType: int64
+		sourceColumn: [Value3]
+
+	partition Fields = calculated
+		source = { ("Sales", NAMEOF('Sales'[Sales Amount]), 0), ("Quantity", NAMEOF('Sales'[Quantity]), 1), ("Color", NAMEOF('Product'[Color]), 2) }
+

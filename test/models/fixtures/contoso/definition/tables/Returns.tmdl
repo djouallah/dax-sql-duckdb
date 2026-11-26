@@ -1,0 +1,21 @@
+table Returns
+
+	column Date
+		dataType: dateTime
+		sourceColumn: Date
+
+	column ProductKey
+		dataType: int64
+		sourceColumn: ProductKey
+
+	column ReturnQty
+		dataType: int64
+		sourceColumn: ReturnQty
+
+	measure Returned = SUM(Returns[ReturnQty])
+
+	partition Returns = entity
+
+		source
+			entityName: Returns
+

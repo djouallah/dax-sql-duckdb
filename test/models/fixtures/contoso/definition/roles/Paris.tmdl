@@ -1,0 +1,5 @@
+role Paris
+	modelPermission: read
+
+	tablePermission Customer = Customer[City] = "Paris"
+

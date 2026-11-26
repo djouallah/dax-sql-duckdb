@@ -1,0 +1,17 @@
+table CityTarget
+
+	column City
+		dataType: string
+		sourceColumn: City
+
+	column Target
+		dataType: int64
+		sourceColumn: Target
+
+	measure 'Target Total' = SUM(CityTarget[Target])
+
+	partition CityTarget = entity
+
+		source
+			entityName: CityTarget
+

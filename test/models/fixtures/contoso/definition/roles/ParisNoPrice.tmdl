@@ -1,0 +1,10 @@
+role ParisNoPrice
+	modelPermission: read
+
+	tablePermission Customer = Customer[City] = "Paris"
+
+	tablePermission Product
+
+		columnPermission Price
+			metadataPermission: none
+

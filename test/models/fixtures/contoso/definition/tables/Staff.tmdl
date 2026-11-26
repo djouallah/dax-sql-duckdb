@@ -1,0 +1,20 @@
+table Staff
+
+	column StaffKey
+		dataType: int64
+		sourceColumn: StaffKey
+		isKey
+
+	column Name
+		dataType: string
+		sourceColumn: Name
+
+	column ManagerKey
+		dataType: int64
+		sourceColumn: ManagerKey
+
+	partition Staff = entity
+
+		source
+			entityName: Staff
+

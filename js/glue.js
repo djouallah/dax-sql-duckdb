@@ -536,29 +536,15 @@ function ownStatement(toks) {
     if (!r.word('SEMANTIC')) return null;
     if (r.word('VIEWS')) {
       r.end();
-      const list = [...views.values()].map(v => [v.db, v.schema, v.name, v.path, tablesFrom(v), v.error ? null : dataAsOf(v)]);
-      const columns = [['database_name', 'VARCHAR'], ['schema_name', 'VARCHAR'], ['view_name', 'VARCHAR'], ['path', 'VARCHAR'],
-        ['tables_from', 'VARCHAR'], ['data_as_of', 'VARCHAR']];
-      return [rows(columns, list)];
+      return [show('views', '', '')];
     }
     const dims = r.word('DIMENSIONS');
     if (!dims) r.expect('METRICS');
     r.expect('IN');
-    const v = view(r.qualified().pop());
-    if (!dims) {
-      r.end();
-      return [rows(ITEM_COLUMNS, metrics(v))];
-    }
-    if (r.words('FOR', 'METRIC')) {
-      const name = r.name();
-      r.end();
-      const m = v.compiler.model.measures.get(lc(name));
-      if (!m) throw fail(`semantic view ${v.name} has no metric ${name}`, 'CATALOG');
-      const model = v.compiler.model, state = model.state();
-      return [rows(ITEM_COLUMNS, dimensions(v, t => model.reaches(t, m.table, state)))];
-    }
+    const name = r.qualified().pop();
+    const metric = dims && r.words('FOR', 'METRIC') ? r.name() : '';
     r.end();
-    return [rows(ITEM_COLUMNS, dimensions(v))];
+    return [show(dims ? 'dimensions' : 'metrics', name, metric)];
   }
   if (r.word('DESCRIBE') || r.word('DESC')) {
     if (r.done()) return null;
@@ -574,6 +560,55 @@ function ownStatement(toks) {
     return [describe(view(v.name))];
   }
   return null;
+}
+
+// What SHOW SEMANTIC lists, as a SELECT over VALUES: kind 'views', 'metrics' or 'dimensions' (of
+// view `name`; with `metric`, only those that filter it). The grammar's dax_sql_show runs it.
+const VIEW_COLUMNS = [['database_name', 'VARCHAR'], ['schema_name', 'VARCHAR'], ['view_name', 'VARCHAR'], ['path', 'VARCHAR'],
+  ['tables_from', 'VARCHAR'], ['data_as_of', 'VARCHAR']];
+function show(kind, name, metric) {
+  if (kind === 'views') {
+    return rows(VIEW_COLUMNS, [...views.values()].map(v => [v.db, v.schema, v.name, v.path, tablesFrom(v), v.error ? null : dataAsOf(v)]));
+  }
+  const v = view(name);
+  if (kind === 'metrics') return rows(ITEM_COLUMNS, metrics(v));
+  if (!metric) return rows(ITEM_COLUMNS, dimensions(v));
+  const m = v.compiler.model.measures.get(lc(metric));
+  if (!m) throw fail(`semantic view ${v.name} has no metric ${metric}`, 'CATALOG');
+  const model = v.compiler.model, state = model.state();
+  return rows(ITEM_COLUMNS, dimensions(v, t => model.reaches(t, m.table, state)));
+}
+
+// DROP SEMANTIC VIEW (the grammar's dax_sql_drop): the view forgotten; its database, schema and
+// name, tab-separated, so the extension deletes its stored row; '' when IF EXISTS finds none.
+function forget(name, ifExists) {
+  const v = views.get(lc(name));
+  if (!v) {
+    if (ifExists === 'true') return '';
+    throw fail(`semantic view ${name} does not exist`, 'CATALOG');
+  }
+  views.delete(lc(name));
+  return [v.db, v.schema, v.name].join('	');
+}
+
+// A statement that failed to bind (the extension's rebind hook): its text with each model query
+// compiled in place, and DESCRIBE v and (DESCRIBE v) / (SHOW SEMANTIC ...) as their rows. '' when
+// nothing in it is the extension's, so DuckDB's own error stands.
+function bindSql(sql) {
+  const list = statements(sql);
+  if (list.length !== 1) return '';
+  const s = list[0];
+  const r = reader(s.toks);
+  if (r.word('DESCRIBE') || r.word('DESC')) {
+    try {
+      const parts = r.qualified();
+      r.end();
+      const v = views.get(lc(parts[parts.length - 1]));
+      if (v) return describe(view(v.name));
+    } catch {}
+  }
+  const out = statementSql(s);
+  return out === s.text ? '' : out;
 }
 
 // A query's text, its model queries compiled in place; the same text when it names no view.
@@ -684,4 +719,7 @@ globalThis.dax_sql = {
   facts,
   set_facts: setFacts,
   data_as_of: name => dataAsOf(view(name)),
+  bind_sql: bindSql,
+  show,
+  forget,
 };

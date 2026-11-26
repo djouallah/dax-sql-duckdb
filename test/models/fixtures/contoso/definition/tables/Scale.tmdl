@@ -1,0 +1,22 @@
+table Scale
+
+	calculationGroup
+		precedence: 20
+
+		calculationItem x2 = SELECTEDMEASURE() * 2
+			ordinal: 0
+
+		calculationItem plus1 = SELECTEDMEASURE() + 1
+			ordinal: 1
+
+	column Scale
+		dataType: string
+		sourceColumn: Name
+		sortByColumn: Ordinal
+
+	column Ordinal
+		dataType: int64
+		sourceColumn: Ordinal
+
+	partition 'Scale Partition' = calculationGroup
+

@@ -1,0 +1,5 @@
+role RedOnly
+	modelPermission: read
+
+	tablePermission Product = Product[Color] = "Red"
+

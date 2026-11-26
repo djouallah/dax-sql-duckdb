@@ -1,0 +1,6 @@
+role NoReturns
+	modelPermission: read
+
+	tablePermission Returns
+		metadataPermission: none
+
