@@ -160,47 +160,15 @@ jobs:
           SQL
           ./cli/duckdb -unsigned -bail -c ".read directlake.sql"
           rm directlake.sql
-      - name: A semantic view from an Ossie YAML in the lakehouse, over its attached catalog
+      - name: A semantic view from an Ossie YAML in the lakehouse (test/onelake/ossie_yaml.sql)
         if: ${{ !cancelled() }}
-        # The nem model as Apache Ossie (Files/semantic_model/ossie.yaml). Its datasets name
-        # mart.<table> and its DirectLake expression holds no lakehouse yet ({WS_ID}, {LH_ID}), so
-        # the view reads the search path: the lakehouse's catalog is attached and made current
-        # first, and the view is created in memory.main (not in the catalog, which is read-only).
+        # The whole test is the SQL file: onelake_sql.sh fills in the ids and the token and runs it.
         run: |
           set -euo pipefail
           STORAGE_TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
           echo "::add-mask::$STORAGE_TOKEN"
-          cat > ossie.sql <<SQL
-          LOAD '$EXT';
-          SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE';
-          CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$STORAGE_TOKEN');
-          .echo on
-          ATTACH '$WS_ID/$LH_ID' AS nem_lake (TYPE iceberg, URI 'https://onelake.table.fabric.microsoft.com/iceberg',
-              TOKEN '$STORAGE_TOKEN', ACCESS_DELEGATION_MODE 'none');
-          USE nem_lake.mart;
-          CREATE SEMANTIC VIEW memory.main.nem_yaml
-              FROM 'abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID/Files/semantic_model/ossie.yaml';
-          SELECT view_name, path, tables_from FROM (SHOW SEMANTIC VIEWS);
-          SELECT count(*) AS metrics FROM (SHOW SEMANTIC METRICS IN nem_yaml);
-          SELECT dim_region.Region, AGG("Registered units") AS units, AGG("Registered MW") AS mw FROM nem_yaml GROUP BY ALL ORDER BY ALL;
-          SELECT dim_calendar.year, AGG("Curtailed MWh") AS curtailed, AGG("Curtailment rate") AS rate FROM nem_yaml GROUP BY ALL ORDER BY ALL;
-          SELECT dim_duid.FuelSourceDescriptor, AGG("Generation MWh") AS generation FROM nem_yaml GROUP BY ALL ORDER BY generation DESC NULLS LAST LIMIT 5;
-          WITH g AS (SELECT dim_region.Region, AGG("Generation MWh") AS generation FROM nem_yaml GROUP BY ALL)
-          SELECT g.Region, generation, count(*) AS units FROM g JOIN nem_lake.mart.dim_duid d ON d."Region" = g.Region GROUP BY ALL ORDER BY 1;
-          SELECT CASE WHEN (SELECT AGG("Registered units") FROM nem_yaml) = (SELECT count(*) FROM nem_lake.mart.dim_duid)
-            THEN 'Registered units: as plain SQL' ELSE error('Registered units differ from plain SQL') END AS "check";
-          WITH v AS (SELECT dim_duid.Region AS region, AGG("Registered MW") AS mw FROM nem_yaml GROUP BY ALL),
-          s AS (SELECT "Region" AS region, sum("RegCapMW")::DOUBLE AS mw FROM nem_lake.mart.dim_duid GROUP BY ALL HAVING sum("RegCapMW") IS NOT NULL)
-          SELECT CASE WHEN count(*) = 0 THEN 'Registered MW by region: as plain SQL'
-            ELSE error('Registered MW by region differs from plain SQL in ' || count(*) || ' regions') END AS "check"
-          FROM v FULL JOIN s ON v.region IS NOT DISTINCT FROM s.region
-          WHERE v.mw IS NULL OR s.mw IS NULL OR abs(v.mw - s.mw) > 1e-9 * greatest(1, abs(s.mw));
-          SELECT CASE WHEN abs((SELECT AGG("Curtailed MWh") FROM nem_yaml) - (SELECT sum(curtailed_mwh)::DOUBLE FROM nem_lake.mart.fct_curtailment))
-              <= 1e-9 * greatest(1, abs((SELECT sum(curtailed_mwh)::DOUBLE FROM nem_lake.mart.fct_curtailment)))
-            THEN 'Curtailed MWh: as plain SQL' ELSE error('Curtailed MWh differs from plain SQL') END AS "check";
-          SQL
-          ./cli/duckdb -unsigned -bail -c ".read ossie.sql"
-          rm ossie.sql
+          export STORAGE_TOKEN
+          .github/scripts/onelake_sql.sh test/onelake/ossie_yaml.sql
       - name: A Direct Lake view kept in a database file
         if: ${{ !cancelled() }}
         # Created in one process; another opens the file, loads the extension, and queries the view:
