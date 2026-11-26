@@ -4,7 +4,8 @@
 //   CREATE [OR REPLACE] SEMANTIC VIEW [IF NOT EXISTS] v FROM 'path'
 //                                  the view's row in its schema's dax_sql_semantic_views; the
 //                                  path a .bim (TMSL), a .tmdl or a folder of them (TMDL), or a
-//                                  .yaml / .yml (Apache Ossie), each read by dax-sql's formats/
+//                                  .yaml / .yml or a folder of .yaml files (Apache Ossie, as a
+//                                  Fabric semantic view's folder), each read by dax-sql's formats/
 //   DROP SEMANTIC VIEW [IF EXISTS] v
 //   REFRESH SEMANTIC VIEW v        the view framed again on its OneLake tables' current snapshots
 //   SHOW SEMANTIC VIEWS | DIMENSIONS IN v [FOR METRIC m] | METRICS IN v, DESCRIBE v
@@ -173,39 +174,88 @@ function oneLake(bim) {
   return tables;
 }
 
+// A Fabric semantic view's folder of Apache Ossie files (Context/Semantic Views/<view>/), merged
+// into one document as Fabric merges them on publish: every file has `version` and `name`; the
+// lists (datasets, relationships, metrics, extensions) are concatenated, in any file order; a
+// name is defined once across the files (metrics by case); the top-level description is the same
+// wherever it is given. A shim until dax-sql's Ossie reader takes a folder, as its TMDL reader does.
+const OSSIE_LISTS = ['datasets', 'relationships', 'metrics', 'custom_extensions', 'nonportable_extensions'];
+function mergeOssie(files) {
+  const merged = {};
+  const defined = new Map();
+  for (const [file, text] of Object.entries(files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    let doc;
+    try {
+      doc = parseYaml(text.replace(/^﻿/, ''));
+    } catch (e) {
+      throw new Error(`${file}: ${e.message}`);
+    }
+    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new Error(`${file} is not an Ossie definition`);
+    for (const key of ['version', 'name']) if (doc[key] == null) throw new Error(`${file} has no ${key}`);
+    if (doc.description != null) {
+      if (merged.description != null && merged.description !== doc.description) {
+        throw new Error(`${file}: its description differs from another file's (one description for the view)`);
+      }
+      merged.description = doc.description;
+    }
+    for (const [key, value] of Object.entries(doc)) {
+      if (OSSIE_LISTS.includes(key)) {
+        if (!Array.isArray(value)) throw new Error(`${file}: ${key} is not a list`);
+        for (const item of value) {
+          if (key !== 'custom_extensions' && key !== 'nonportable_extensions' && item?.name != null) {
+            const id = `${key}:${key === 'metrics' ? lc(item.name) : item.name}`;
+            if (defined.has(id)) throw new Error(`${key.replace(/s$/, '')} ${item.name} is in ${defined.get(id)} and ${file}`);
+            defined.set(id, file);
+          }
+        }
+        merged[key] = [...(merged[key] ?? []), ...value];
+      } else if (key !== 'description' && !(key in merged)) {
+        merged[key] = value;
+      }
+    }
+  }
+  return merged;
+}
+
+// An Apache Ossie document as TMSL, by dax-sql's reader.
+function ossieTmsl(path, doc) {
+  const skipped = [];
+  if (!doc || typeof doc !== 'object' || !Array.isArray(doc.datasets)) throw new Error('it has no datasets');
+  const bim = ossieToTmsl(doc, { onSkip: s => skipped.push(s.why) });
+  // A metric dax-sql cannot read is left out, as dax-sql does; a model left with none is refused.
+  const measures = (bim.model?.tables ?? []).reduce((n, t) => n + (t.measures?.length ?? 0), 0);
+  if (!measures && skipped.length) throw fail(`${path}: none of its metrics can be read: ${skipped.join('; ')}`, 'INPUT');
+  return bim;
+}
+
 // A model's file as TMSL, read by dax-sql's reader of its format, which its path says. A folder
-// of TMDL files comes from the extension as one JSON object, { "<path in it>": "<text>" }.
-const FORMATS = 'a .bim (TMSL), a .tmdl or a folder of them (TMDL), or a .yaml / .yml (Apache Ossie)';
+// comes from the extension as one JSON object, { "<path in it>": "<text>" }: its .tmdl files
+// (TMDL), or else its .yaml files (a Fabric semantic view's folder of Apache Ossie files).
+const FORMATS = 'a .bim (TMSL), a .tmdl or a folder of them (TMDL), or a .yaml / .yml or a folder of .yaml files (Apache Ossie)';
 function toTmsl(path, text) {
   const body = String(text).replace(/^﻿/, '');
   const read = (what, f) => {
     try {
       return f();
     } catch (e) {
+      if (e.code) throw e;
       throw fail(`${path} is not ${what}: ${e.message}`, 'INPUT');
     }
   };
   if (/\.bim$/i.test(path)) return read('a TMSL model', () => JSON.parse(body));
   if (/\.tmdl$/i.test(path)) return read('a TMDL model', () => tmdlToTmsl(body));
-  if (/\.ya?ml$/i.test(path)) {
-    const skipped = [];
-    const bim = read('an Apache Ossie model', () => {
-      const doc = parseYaml(body);
-      if (!doc || typeof doc !== 'object' || !Array.isArray(doc.datasets)) throw new Error('it has no datasets');
-      return ossieToTmsl(doc, { onSkip: s => skipped.push(s.why) });
-    });
-    // A metric dax-sql cannot read is left out, as dax-sql does; a model left with none is refused.
-    const measures = (bim.model?.tables ?? []).reduce((n, t) => n + (t.measures?.length ?? 0), 0);
-    if (!measures && skipped.length) throw fail(`${path}: none of its metrics can be read: ${skipped.join('; ')}`, 'INPUT');
-    return bim;
-  }
+  if (/\.ya?ml$/i.test(path)) return read('an Apache Ossie model', () => ossieTmsl(path, parseYaml(body)));
   let files = null;
   try {
     files = JSON.parse(body);
   } catch {}
   const folder = files && typeof files === 'object' && !Array.isArray(files) && Object.values(files).every(v => typeof v === 'string');
   if (!folder) throw fail(`${path}: a semantic view is read from ${FORMATS}`, 'INPUT');
-  if (!Object.keys(files).length) throw fail(`${path}: the folder has no .tmdl file`, 'INPUT');
+  const names = Object.keys(files);
+  if (!names.length) throw fail(`${path}: the folder has no .tmdl or .yaml file`, 'INPUT');
+  if (names.every(n => /\.yaml$/i.test(n))) {
+    return read('a folder of Apache Ossie files', () => ossieTmsl(path, mergeOssie(files)));
+  }
   return read('a TMDL model', () => tmdlToTmsl(files));
 }
 

@@ -1,5 +1,5 @@
 # name: test/sql/formats.test
-# description: a semantic view from each format dax-sql reads: TMSL (.bim), TMDL (one .tmdl, or a folder of them) and Apache Ossie (.yaml); the same model in two formats gives the same rows
+# description: a semantic view from each format dax-sql reads: TMSL (.bim), TMDL (one .tmdl, or a folder of them) and Apache Ossie (.yaml, or a folder of them as a Fabric semantic view's); the same model in two formats gives the same rows
 # group: [sql]
 
 require dax_sql
@@ -174,6 +174,53 @@ SELECT (SELECT count(*) FROM q4_aac_bim) > 0, (SELECT count(*) FROM (FROM q4_aac
 ----
 true	0	0
 
+# --- Apache Ossie as a folder: a Fabric semantic view's (Context/Semantic Views/<view>/) ----------
+# aac's ossie.yaml split by test/tools/ossie_to_folder.mjs (run by CI before the tests): its
+# datasets in two files under datasets/, its relationships and metrics in files of their own, the
+# description in model.yaml, and a .yml file that is not read. Every .yaml is merged, as Fabric
+# merges them on publish: the same model, so the same rows as the one file.
+
+statement ok
+CREATE SEMANTIC VIEW aac_folder FROM 'test/models/generated/aac_ossie';
+
+query II
+SELECT (SELECT count(*) FROM (SHOW SEMANTIC METRICS IN aac_folder)) = (SELECT count(*) FROM (SHOW SEMANTIC METRICS IN aac_ossie)),
+       (SELECT count(*) FROM ((SELECT * FROM (DESCRIBE aac_folder)) EXCEPT ALL (SELECT * FROM (DESCRIBE aac_ossie))));
+----
+true	0
+
+statement ok
+CREATE TABLE f1_aac_folder AS SELECT * FROM (SELECT dim_duid.Region, AGG("Registered units") AS units, round(AGG("Registered MW"), 6) AS mw FROM aac_folder GROUP BY ALL);
+
+query III
+SELECT (SELECT count(*) FROM f1_aac_folder) > 0, (SELECT count(*) FROM (FROM q1_aac_ossie EXCEPT ALL FROM f1_aac_folder)), (SELECT count(*) FROM (FROM f1_aac_folder EXCEPT ALL FROM q1_aac_ossie));
+----
+true	0	0
+
+statement ok
+CREATE TABLE f2_aac_folder AS SELECT * FROM (SELECT dim_duid.FuelSourceDescriptor, round(AGG("Generation MWh"), 6) AS mwh FROM aac_folder GROUP BY ALL);
+
+query III
+SELECT (SELECT count(*) FROM f2_aac_folder) > 0, (SELECT count(*) FROM (FROM q2_aac_ossie EXCEPT ALL FROM f2_aac_folder)), (SELECT count(*) FROM (FROM f2_aac_folder EXCEPT ALL FROM q2_aac_ossie));
+----
+true	0	0
+
+statement ok
+CREATE TABLE f3_aac_folder AS SELECT * FROM (SELECT dim_duid.Region, dim_duid.TechnologyType, round(AGG("Generation MWh"), 6) AS mwh, GROUPING(dim_duid.TechnologyType) AS subtotal FROM aac_folder GROUP BY dim_duid.Region, ROLLUP(dim_duid.TechnologyType));
+
+query III
+SELECT (SELECT count(*) FROM f3_aac_folder) > 0, (SELECT count(*) FROM (FROM q3_aac_ossie EXCEPT ALL FROM f3_aac_folder)), (SELECT count(*) FROM (FROM f3_aac_folder EXCEPT ALL FROM q3_aac_ossie));
+----
+true	0	0
+
+statement ok
+CREATE TABLE f4_aac_folder AS SELECT * FROM (SELECT dim_calendar.date, round(AGG("Curtailed MWh"), 6) AS curtailed, round(AGG("Curtailment rate"), 9) AS rate FROM aac_folder GROUP BY ALL);
+
+query III
+SELECT (SELECT count(*) FROM f4_aac_folder) > 0, (SELECT count(*) FROM (FROM q4_aac_ossie EXCEPT ALL FROM f4_aac_folder)), (SELECT count(*) FROM (FROM f4_aac_folder EXCEPT ALL FROM q4_aac_ossie));
+----
+true	0	0
+
 # --- what is refused ---------------------------------------------------------------------------
 
 # a file of no model format
@@ -197,3 +244,22 @@ no_such_model.tmdl
 # a folder with no .tmdl in it
 statement error
 CREATE SEMANTIC VIEW wrong FROM 'test/cli';
+
+# a folder of Ossie files that define a dataset twice (test/models/generated/aac_ossie_twice: the
+# folder above, with its first datasets file once more)
+statement error
+CREATE SEMANTIC VIEW wrong FROM 'test/models/generated/aac_ossie_twice';
+----
+is in datasets/dimensions.yaml and extra.yaml
+
+# a folder of Ossie files whose descriptions differ
+statement error
+CREATE SEMANTIC VIEW wrong FROM 'test/models/generated/aac_ossie_descriptions';
+----
+its description differs from another file's
+
+# a folder of Ossie files, one without its name
+statement error
+CREATE SEMANTIC VIEW wrong FROM 'test/models/generated/aac_ossie_unnamed';
+----
+has no name

@@ -172,13 +172,20 @@ static string ReadModel(ClientContext &context, const string &path) {
 	while (dir.size() > 1 && (dir.back() == '/' || dir.back() == '\\')) {
 		dir.pop_back();
 	}
+	// A folder: its .tmdl files (TMDL), or else its .yaml files, at any depth (a Fabric semantic
+	// view's folder of Apache Ossie files; .yml is not read there, as Fabric does not read it).
 	vector<string> files;
-	try {
-		for (auto &info : fs.Glob(dir + "/**/*.tmdl")) {
-			files.push_back(info.path);
+	for (auto ext : {".tmdl", ".yaml"}) {
+		try {
+			for (auto &info : fs.Glob(dir + "/**/*" + ext)) {
+				files.push_back(info.path);
+			}
+		} catch (std::exception &) {
+			files.clear();
 		}
-	} catch (std::exception &) {
-		files.clear();
+		if (!files.empty()) {
+			break;
+		}
 	}
 	if (files.empty()) {
 		return ReadFile(context, path);

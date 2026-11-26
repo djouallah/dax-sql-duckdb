@@ -67,6 +67,17 @@ jobs:
           python-version: "3.12"
       - name: contoso as TMDL, one file and a folder (test/sql/formats.test reads them)
         run: node test/tools/bim_to_tmdl.mjs third_party/dax-sql/conformance/models/contoso/model.bim test/models/generated/contoso
+      - name: aac's ossie.yaml as a Fabric semantic view's folder of YAML files (test/sql/formats.test reads them)
+        run: |
+          set -euo pipefail
+          G=test/models/generated
+          node test/tools/ossie_to_folder.mjs third_party/dax-sql/conformance/models/aac/ossie.yaml $G/aac_ossie
+          # the folders formats.test refuses: a dataset twice, two descriptions, a file with no name
+          cp -r $G/aac_ossie $G/aac_ossie_twice && cp $G/aac_ossie/datasets/dimensions.yaml $G/aac_ossie_twice/extra.yaml
+          cp -r $G/aac_ossie $G/aac_ossie_descriptions
+          { echo 'version: 0.3.0.dev0'; echo 'name: aac'; echo 'description: another one'; } > $G/aac_ossie_descriptions/other.yaml
+          cp -r $G/aac_ossie $G/aac_ossie_unnamed
+          { echo 'version: 0.3.0.dev0'; echo 'metrics: []'; } > $G/aac_ossie_unnamed/unnamed.yaml
       - name: The sqllogictests
         run: |
           pip install -q duckdb==2.0.1
