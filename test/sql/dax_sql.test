@@ -91,7 +91,7 @@ nothing.bim
 statement error
 CREATE SEMANTIC VIEW wrong FROM 'third_party/dax-sql/conformance/models/contoso/data/Sales.csv';
 ----
-a semantic view is read from a .bim (TMSL), a .tmdl or a folder of them (TMDL), or a .yaml / .yml (Apache Ossie)
+a semantic view is read from a .bim (TMSL), a .tmdl or a folder of them (TMDL)
 
 # --- querying ---------------------------------------------------------------------------------
 
