@@ -22,6 +22,11 @@ public:
 	string Call(const char *fn, const vector<string> &args);
 
 private:
+	//! The runtime and the glue, set up on a JS thread.
+	void Start();
+	//! Call's work, on a JS thread.
+	string CallHere(const char *fn, const vector<string> &args);
+
 	std::mutex lock;
 	JSRuntime *rt;
 	JSContext *ctx;
