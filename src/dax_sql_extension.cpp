@@ -647,16 +647,8 @@ static void StoreView(DatabaseInstance &db, const DefinedView &v) {
 	Run(con, "CREATE TABLE IF NOT EXISTS " + table +
 	             " (view_name VARCHAR, path VARCHAR, definition VARCHAR, created_on TIMESTAMP)");
 	Run(con, "DELETE FROM " + table + " WHERE lower(view_name) = lower(" + KeywordHelper::WriteQuoted(v.name) + ")");
-	auto insert = con.Prepare("INSERT INTO " + table + " VALUES ($1, $2, $3, $4)");
-	if (insert->HasError()) {
-		insert->error.Throw();
-	}
-	vector<Value> values {Value(v.name), Value(v.path), Value(v.text),
-	                      Value::TIMESTAMP(Timestamp::GetCurrentTimestamp())};
-	auto result = insert->Execute(values, false);
-	if (result->HasError()) {
-		result->ThrowError();
-	}
+	Run(con, "INSERT INTO " + table + " VALUES (" + Value(v.name).ToSQLString() + ", " + Value(v.path).ToSQLString() +
+	             ", " + Value(v.text).ToSQLString() + ", current_timestamp::TIMESTAMP)");
 }
 
 // dax_sql_create(db, schema, name, path, mode): what CREATE SEMANTIC VIEW is (dax_sql_grammar.cpp).
@@ -715,10 +707,8 @@ static unique_ptr<FunctionData> ShowBind(ClientContext &context, TableFunctionBi
 	if (result->HasError()) {
 		result->ThrowError();
 	}
-	return_types = result->types;
-	for (auto &name : result->names) {
-		names.emplace_back(name);
-	}
+	return_types = result->GetTypes();
+	names = result->GetNames();
 	auto data = make_uniq<DefineData>();
 	auto &collection = result->Collection();
 	for (auto &chunk : collection.Chunks()) {
