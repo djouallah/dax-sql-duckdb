@@ -1,33 +1,68 @@
 # dax_sql, a DuckDB extension
 
-A DuckDB extension that makes a semantic model (a TMSL `.bim`, a TMDL `.tmdl` or folder, or an Apache Ossie `.yaml`) a relation in
-DuckDB, compiled by [dax-sql](https://github.com/djouallah/dax-sql). The design is
-[EXTENSION.md](EXTENSION.md).
+`dax_sql` makes a Power BI semantic model a semantic view in DuckDB, queried in plain SQL. The
+model's measures are DAX; they are compiled to DuckDB SQL by
+[dax-sql](https://github.com/djouallah/dax-sql), embedded in the extension.
 
-It targets DuckDB 2.0 and later, and was made from DuckDB's
-[extension template](https://github.com/duckdb/extension-template). The `duckdb` and
-`extension-ci-tools` submodules are pinned to DuckDB v2.0.0.
+```sql
+LOAD dax_sql;
+CREATE SECRET onelake (TYPE azure, PROVIDER credential_chain);
 
-## Stage one: the CLI
+CREATE SEMANTIC VIEW sales
+    FROM 'abfss://<workspace>@onelake.dfs.fabric.microsoft.com/<lakehouse>/Files/model.bim';
 
-The first stage is a native build loaded into the DuckDB 2.0 CLI. Wasm comes later. So far the
-extension registers one function, `dax_sql_version()`.
+SELECT Product.Color, AGG(Orders) AS orders, AGG("Sales Amount") AS amount
+FROM sales
+WHERE Customer.Country = 'France'
+GROUP BY ALL
+ORDER BY amount DESC;
+```
 
-Everything is verified in CI; nothing is built or run on a laptop.
+- **The model:**
+  - a TMSL `.bim`;
+  - a TMDL `.tmdl`, or a folder of them;
+  - an Apache Ossie `.yaml`, or a folder of them as a Fabric semantic view keeps them
+    (`Context/Semantic Views/<view>/`).
 
-- **Build:** `linux_amd64` and `windows_amd64`, each running `test/sql/` against its build.
-- **DuckDB CLI** (`cli` job): loads the `linux_amd64` build into the official DuckDB v2.0.0 CLI
-  (`-unsigned`, since the build is not signed). The same CLI then reads OneLake's Iceberg
-  REST catalog with the token from CI's identity: it lists the lakehouse's tables and counts
-  one.
+  The file is read from wherever DuckDB reads: a local path, S3, Azure or OneLake.
+- **The data:** a Direct Lake model names its lakehouse, so the view attaches it through OneLake's
+  Iceberg REST catalog and reads its tables there, pinned to their current snapshots. Any other
+  model reads its tables from the search path.
+- **Queries:** plain DuckDB SQL. A measure is `AGG(name)`, or `AGG("name with spaces")`. Model
+  queries go wherever DuckDB takes a subquery: CTEs, joins, `UNION`, `IN`, `CREATE TABLE AS`.
+- **Statements:**
+  - `CREATE [OR REPLACE] SEMANTIC VIEW [IF NOT EXISTS] v FROM '…'`
+  - `DROP SEMANTIC VIEW [IF EXISTS] v`
+  - `REFRESH SEMANTIC VIEW v`
+  - `SHOW SEMANTIC VIEWS`
+  - `SHOW SEMANTIC DIMENSIONS | METRICS IN v`
+  - `DESCRIBE v`
 
-The `cli` job signs in to Azure with OIDC, as dax-sql's CI does. Its identity is the Entra
-app whose federated credential `dax-sql-duckdb-main` trusts this repo's `main`. The repository
-variables are:
+The design, and how it works: [EXTENSION.md](EXTENSION.md).
 
-| Variable | What |
+## Platforms
+
+DuckDB 2.0.1, on every native platform. Not DuckDB-Wasm: OneLake is read through the `azure`
+extension, which has no wasm build.
+
+## Tests
+
+Everything is verified in CI:
+
+- **sqllogictests:** `test/sql/`, with their fixtures in `test/models/fixtures/`.
+- **Live tests:** the DuckDB CLI reads a real lakehouse, with the SQL files in `test/onelake/` and
+  the Test workflow's steps. They sign in to Azure with OIDC: the Entra app's federated credential
+  trusts this repository's `main` branch, and nothing runs for a fork's pull request.
+
+| Repository variable | What |
 |---|---|
 | `AZURE_CLIENT_ID` | The Entra app CI signs in as |
 | `AZURE_TENANT_ID` | Its tenant |
 | `WS_ID` | The Fabric workspace |
-| `LH_ID` | The lakehouse in it whose tables the job reads |
+| `LH_ID` | The lakehouse whose tables the tests read |
+| `SM_ID` | The semantic model whose `.bim` the tests read |
+| `FULL_CI` | `true`: build every platform and run the tests in the build, as community-extensions does |
+
+## License
+
+MIT ([LICENSE](LICENSE)). Third-party code: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

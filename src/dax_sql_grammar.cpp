@@ -352,8 +352,8 @@ void RegisterDaxSqlGrammar(DatabaseInstance &db) {
 	GrammarExtension::Register(db, grammar);
 	ExtensionCallback::Register(DBConfig::GetConfig(db), make_shared_ptr<DaxSqlGrammarActivation>(grammar));
 	for (auto &connection : db.GetConnectionManager().GetConnectionList()) {
-		connection->registered_state->GetOrCreate<DaxSqlPendingGrammarActivation>(
-		    DaxSqlPendingGrammarActivation::KEY, grammar);
+		connection->registered_state->GetOrCreate<DaxSqlPendingGrammarActivation>(DaxSqlPendingGrammarActivation::KEY,
+		                                                                          grammar);
 	}
 }
 

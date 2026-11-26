@@ -31,7 +31,6 @@
 #include "duckdb/planner/extension_callback.hpp"
 #include "dax_sql_grammar.hpp"
 #include "js_engine.hpp"
-#include "onelake_fs.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -311,14 +310,11 @@ static string SecretValue(ClientContext &context, const string &path, const stri
 
 // A storage token from the Azure CLI, as a credential_chain secret's `cli` step gets it. A POC hack:
 // the azure extension resolves the chain but keeps the token to itself, until duckdb-azure#191
-// stores it in the secret. Native builds only (the browser has no CLI).
+// stores it in the secret.
 static constexpr const char *AZ_STORAGE_TOKEN =
     "az account get-access-token --resource https://storage.azure.com --query accessToken -o tsv";
 
 static string CliToken() {
-#ifdef __EMSCRIPTEN__
-	return "";
-#else
 #ifdef _WIN32
 	auto command = string(AZ_STORAGE_TOKEN) + " 2>NUL";
 	auto pipe = _popen(command.c_str(), "r");
@@ -341,7 +337,6 @@ static string CliToken() {
 #endif
 	StringUtil::Trim(out);
 	return out;
-#endif
 }
 
 // The chain of the credential_chain Azure secret DuckDB finds for `path`, lower case ("default" when
@@ -586,7 +581,7 @@ static vector<string> StringArgs(TableFunctionBindInput &input, const char *func
 			throw InvalidInputException("%s: an argument is NULL", function);
 		}
 		args.push_back(v.type().id() == LogicalTypeId::BOOLEAN ? (BooleanValue::Get(v) ? "true" : "false")
-		                                                        : StringValue::Get(v));
+		                                                       : StringValue::Get(v));
 	}
 	return args;
 }
@@ -886,11 +881,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                         SetFactsFunction(state));
 	set_facts.SetVolatile();
 	loader.RegisterFunction(set_facts);
-
-#ifdef __EMSCRIPTEN__
-	// The browser has no azure extension: OneLake's abfss:// files are read over https (httpfs).
-	db.GetFileSystem().RegisterSubSystem(make_uniq<OneLakeHttpFileSystem>(db));
-#endif
 
 	RestoreViews(db, *state);
 

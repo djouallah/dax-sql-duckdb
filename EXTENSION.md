@@ -240,7 +240,7 @@ The compiled SQL then names `<internal>.<schemaName>.<entityName>`, and DuckDB's
 
      Steps 3 and 4 are hacks until #191: the azure extension resolves the chain but keeps the
      token to itself. They are native only;
-  5. an http secret's `bearer_token`: the browser, which has no azure extension.
+  5. an http secret's `bearer_token`.
 
   When none gives a token, the attach's error in `tables_from` says why (`no token: …`).
 
@@ -257,8 +257,8 @@ The compiled SQL then names `<internal>.<schemaName>.<entityName>`, and DuckDB's
 - **A model without a OneLake location:** a partition with no `expressionSource` is read as
   `schema.entity` through the session's search path. That is how the tests run the
   conformance models over local tables.
-- **A lakehouse that cannot be attached:** when the attach fails (no `azure` extension, as in
-  the browser; no secret; no network), `CREATE` still succeeds. The view reads the same
+- **A lakehouse that cannot be attached:** when the attach fails (no `azure` extension, no
+  secret, no network), `CREATE` still succeeds. The view reads the same
   `schema.entity` tables from the search path instead, such as a DuckDB file holding a copy of
   the lakehouse: `ATTACH 'copy.duckdb'; USE copy;`. `SHOW SEMANTIC VIEWS` says where each view's
   tables come from (`tables_from`), with the attach's error when it failed. A view restored on
@@ -306,51 +306,15 @@ compiler. The compiler still reads nothing, and every rule stays in dax-sql:
 - **Not-null keys** stay the model's (`nullable`, TMSL's `isNullable`): a constraint, true across
   loads. Orphan answers are a fact about one version of the data (#6).
 
-### Running in the browser (DuckDB-Wasm)
+### Not for DuckDB-Wasm
 
-The extension is built for `wasm_eh`, and it works in DuckDB-Wasm. CI's `wasm` job
-(`test/wasm/probe.js`) loads it in headless Chromium and checks, item by item:
-
-- **What works:**
-  - `LOAD`, and the grammar and the rebind hook on the page's connection;
-  - `CREATE SEMANTIC VIEW` from a `.bim` over HTTP;
-  - model queries on their own and inside a CTE, `DESCRIBE`, `SHOW SEMANTIC METRICS` and
-    `dax_sql_rewrite()`;
-  - deep measures (time intelligence, `ALLSELECTED`): the compiler's JS stack fits inside
-    DuckDB-Wasm's 1 MB wasm stack.
-- **Reading OneLake live, without `azure`.** extensions.duckdb.org publishes `iceberg` for wasm
-  on v2.0.0 but not `azure` (duckdb-azure builds no wasm target). The probe's Direct Lake view
-  over the live lakehouse gives the same rows as native. Four pieces, all POC hacks until
-  duckdb-wasm#2238 (abfss over https with a SAS) or an `azure` wasm build:
-  - **The token:** the page's http secret (`CREATE SECRET (TYPE http, BEARER_TOKEN '…')`). The
-    extension passes it to the catalog's `ATTACH`.
-  - **The paths:** OneLake's Iceberg metadata names `abfss://` files. In wasm the extension
-    registers a file system (`src/onelake_fs.cpp`) that opens them as
-    `https://onelake.dfs.fabric.microsoft.com/<workspace>/…` through httpfs.
-  - **Signing the file reads:** httpfs in the browser does not send the http secret's bearer to
-    OneLake, which answers 401. The page registers a service worker (`test/wasm/sw.js`) that adds
-    `Authorization: Bearer` to requests to `onelake.dfs.fabric.microsoft.com`.
-  - **The ETag check:** OneLake's reads then fail httpfs's check ("changed after it was opened"),
-    so the page sets `unsafe_disable_etag_checks = true`. The cause is not known yet.
-
-  CORS passes for the catalog and the storage. The token is the page's to get; MSAL.js needs an
-  app registration.
-- **A Direct Lake `.bim` with no token works over a copy.** Its lakehouse is not attached, so
-  the view reads the same tables from the search path. The probe attaches `nem.duckdb`, a copy of the
-  `nem` lakehouse, by URL (`ATTACH 'https://…/nem.duckdb' (READ_ONLY)`, `httpfs` autoloaded),
-  and queries the `nem` view over it.
-- **DuckDB-Wasm on v2.0.0 is not released yet.** npm's latest predates 2.0. The job takes the
-  build from DuckDB-Wasm's own CI (`main`, on v2.0.0's commit). That build is untagged and calls
-  itself `d54cbbe3df`, so it refuses an extension stamped `v2.0.0`. For the test only, the job
-  stamps its copy with that name. A DuckDB-Wasm release on v2.0.0 takes the build as it is.
-- **Signing:** DuckDB-Wasm loads only signed extensions unless the page sets
-  `allowUnsignedExtensions`, as the probe does. Published through community extensions, the
-  extension is signed.
-- **Files go through DuckDB's `FileSystem`,** never `std::ifstream`. In the browser that is HTTP
-  or DuckDB-Wasm's registered files; on native builds the same code reads S3, Azure or OneLake.
-- **Not yet built:** `wasm_mvp` and `wasm_threads`.
-- **QuickJS in wasm in a browser runs JavaScript inside JavaScript.** It is kept anyway: one
-  binary behaves the same everywhere.
+The extension is not built for wasm. What it is for is OneLake, read as `abfss://` through
+DuckDB's `azure` extension, and `azure` has no wasm build (duckdb-azure builds no wasm target).
+An earlier build ran in DuckDB-Wasm, reading OneLake live only through hacks of its own: a file
+system mapping `abfss://` to `https://`, a page's service worker signing each file read, and
+httpfs's ETag check turned off. That is not a thing to ship. The descriptor's `excluded_platforms`
+leaves the wasm platforms out (`wasm_mvp;wasm_eh;wasm_threads`); a wasm build comes back when
+`azure` has one, or DuckDB-Wasm reads `abfss://` itself (duckdb-wasm#2238).
 
 ## Choices set aside
 
@@ -384,8 +348,8 @@ The extension is built for `wasm_eh`, and it works in DuckDB-Wasm. CI's `wasm` j
 1. **The CLI.** Native builds (`linux_amd64` and `windows_amd64` first), loaded into the DuckDB
    2.0 CLI: create a semantic view from a `.bim`, query it, inspect it, and read its data
    from OneLake.
-2. **Wasm.** `wasm_eh` in DuckDB-Wasm: works, except Direct Lake, which waits for `azure` in
-   wasm ([Running in the browser](#running-in-the-browser-duckdb-wasm)).
+2. **Every native platform** community-extensions builds, as a community extension. Not wasm
+   ([Not for DuckDB-Wasm](#not-for-duckdb-wasm)).
 
 ## Open questions
 
@@ -419,8 +383,6 @@ Each one is settled by a first, small build, before the rest is written.
   into the DuckDB v2.0.0 CLI and reads the lakehouse through the Iceberg REST catalog. Once
   `CREATE SEMANTIC VIEW` exists, it creates a view from a Direct Lake `.bim` over that
   lakehouse and checks a few answers.
-- **Wasm:** a CI job loads the `wasm_eh` build in DuckDB-Wasm and runs a model query over
-  tables it holds.
 - **Conformance:** the suite's queries are DAX, which this syntax does not take, so they are
   not run through the extension yet. Its SQL tests compare each answer with the same query
   run through dax-sql in Node.

@@ -38,8 +38,8 @@ include(cmake/embed_js.cmake)
 dax_sql_embed_js(${CMAKE_CURRENT_BINARY_DIR}/dax_sql_js_modules.hpp)
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
-set(EXTENSION_SOURCES src/dax_sql_extension.cpp src/dax_sql_grammar.cpp src/js_engine.cpp
-                      src/onelake_fs.cpp ${QJS_SOURCES})
+set(EXTENSION_SOURCES src/dax_sql_extension.cpp src/dax_sql_grammar.cpp
+                      src/js_engine.cpp ${QJS_SOURCES})
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

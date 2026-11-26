@@ -25,8 +25,9 @@ jobs:
       # repository variable FULL_CI is 'true'. Then as community-extensions builds a submission:
       # every platform extension-ci-tools builds, and the sqllogictests run in the build, in DuckDB's
       # own test runner. A platform that cannot build goes in the descriptor's excluded_platforms.
-      # ('none' excludes nothing: an empty string would read as false in the expression.)
-      exclude_archs: ${{ vars.FULL_CI == 'true' && 'none' || 'wasm_mvp;wasm_threads;wasm_eh;linux_arm64;linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_arm64;windows_amd64;windows_amd64_mingw' }}
+      # No wasm at all: DuckDB-Wasm has no azure extension, so it cannot read OneLake (abfss://),
+      # which is what the extension is for; the descriptor's excluded_platforms says the same.
+      exclude_archs: ${{ vars.FULL_CI == 'true' && 'wasm_mvp;wasm_eh;wasm_threads' || 'wasm_mvp;wasm_threads;wasm_eh;linux_arm64;linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_arm64;windows_amd64;windows_amd64_mingw' }}
       skip_tests: ${{ vars.FULL_CI != 'true' }}
 
   code-quality-check:
