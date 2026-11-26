@@ -153,10 +153,10 @@ SELECT (SELECT count(*) FROM q2_aac_bim) > 0, (SELECT count(*) FROM (FROM q2_aac
 true	0	0
 
 statement ok
-CREATE TABLE q3_aac_bim AS SELECT * FROM (SELECT dim_duid.Region, dim_duid.TechnologyType, round(AGG("Generation MWh"), 6) AS mwh FROM aac_bim GROUP BY dim_duid.Region, ROLLUP(dim_duid.TechnologyType));
+CREATE TABLE q3_aac_bim AS SELECT * FROM (SELECT dim_duid.Region, dim_duid.TechnologyType, round(AGG("Generation MWh"), 6) AS mwh, GROUPING(dim_duid.TechnologyType) AS subtotal FROM aac_bim GROUP BY dim_duid.Region, ROLLUP(dim_duid.TechnologyType));
 
 statement ok
-CREATE TABLE q3_aac_ossie AS SELECT * FROM (SELECT dim_duid.Region, dim_duid.TechnologyType, round(AGG("Generation MWh"), 6) AS mwh FROM aac_ossie GROUP BY dim_duid.Region, ROLLUP(dim_duid.TechnologyType));
+CREATE TABLE q3_aac_ossie AS SELECT * FROM (SELECT dim_duid.Region, dim_duid.TechnologyType, round(AGG("Generation MWh"), 6) AS mwh, GROUPING(dim_duid.TechnologyType) AS subtotal FROM aac_ossie GROUP BY dim_duid.Region, ROLLUP(dim_duid.TechnologyType));
 
 query III
 SELECT (SELECT count(*) FROM q3_aac_bim) > 0, (SELECT count(*) FROM (FROM q3_aac_bim EXCEPT ALL FROM q3_aac_ossie)), (SELECT count(*) FROM (FROM q3_aac_ossie EXCEPT ALL FROM q3_aac_bim));
