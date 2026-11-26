@@ -241,7 +241,7 @@ static string JsonString(const string &s) {
 // A model's text, as the glue reads it: a file's own text, or for a folder of TMDL files (a PBIP's
 // definition/, a .SemanticModel folder) one JSON object, { "<file>": "<text>", ... }. A path that
 // does not end in a model file's extension is globbed for **/*.tmdl first; with none found it is
-// read as a file, and the glue says what it takes.
+// read as a file, and the glue says what it takes. A folder with none in it is refused.
 static string ReadModel(ClientContext &context, const string &path) {
 	auto lower = StringUtil::Lower(path);
 	for (auto ext : {".bim", ".tmdl", ".yaml", ".yml"}) {
@@ -270,6 +270,14 @@ static string ReadModel(ClientContext &context, const string &path) {
 		}
 	}
 	if (files.empty()) {
+		bool folder = false;
+		try {
+			folder = fs.DirectoryExists(dir);
+		} catch (std::exception &) {
+		}
+		if (folder) {
+			throw InvalidInputException("%s is a folder with no .tmdl or .yaml file in it", path);
+		}
 		return ReadFile(context, path);
 	}
 	std::sort(files.begin(), files.end());
