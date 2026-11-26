@@ -1,0 +1,199 @@
+# name: test/sql/formats.test
+# description: a semantic view from each format dax-sql reads: TMSL (.bim), TMDL (one .tmdl, or a folder of them) and Apache Ossie (.yaml); the same model in two formats gives the same rows
+# group: [sql]
+
+require dax_sql
+
+# --- TMDL: contoso written as TMDL (test/tools/bim_to_tmdl.mjs, run by CI before the tests) ------
+
+statement ok
+CREATE TABLE "Sales" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Sales.csv', header = true, types = {'Amount': 'DECIMAL(18,4)'});
+
+statement ok
+CREATE TABLE "Product" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Product.csv', header = true);
+
+statement ok
+CREATE TABLE "Category" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Category.csv', header = true);
+
+statement ok
+CREATE TABLE "Customer" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Customer.csv', header = true);
+
+statement ok
+CREATE TABLE "Date" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Date.csv', header = true);
+
+statement ok
+CREATE TABLE "Returns" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Returns.csv', header = true);
+
+statement ok
+CREATE SEMANTIC VIEW contoso FROM 'third_party/dax-sql/conformance/models/contoso/model.bim';
+
+statement ok
+CREATE SEMANTIC VIEW contoso_file FROM 'test/models/generated/contoso.tmdl';
+
+statement ok
+CREATE SEMANTIC VIEW contoso_dir FROM 'test/models/generated/contoso/definition';
+
+query I
+SELECT view_name FROM (SHOW SEMANTIC VIEWS) ORDER BY ALL;
+----
+contoso
+contoso_dir
+contoso_file
+
+# the same metrics and columns from each
+query II
+SELECT (SELECT count(*) FROM (SHOW SEMANTIC METRICS IN contoso)) = (SELECT count(*) FROM (SHOW SEMANTIC METRICS IN contoso_file)),
+       (SELECT count(*) FROM (SHOW SEMANTIC METRICS IN contoso)) = (SELECT count(*) FROM (SHOW SEMANTIC METRICS IN contoso_dir));
+----
+true	true
+
+query I
+SELECT count(*) FROM ((SELECT * FROM (DESCRIBE contoso)) EXCEPT ALL (SELECT * FROM (DESCRIBE contoso_dir)));
+----
+0
+
+statement ok
+CREATE TABLE r_contoso AS SELECT * FROM (SELECT Category.Category, Product.Color, AGG("Sales Amount") AS amount, AGG(Orders) AS orders, AGG("Share of Category") AS share, AGG("Sales YTD") AS ytd FROM contoso GROUP BY ALL);
+
+statement ok
+CREATE TABLE r_contoso_file AS SELECT * FROM (SELECT Category.Category, Product.Color, AGG("Sales Amount") AS amount, AGG(Orders) AS orders, AGG("Share of Category") AS share, AGG("Sales YTD") AS ytd FROM contoso_file GROUP BY ALL);
+
+statement ok
+CREATE TABLE r_contoso_dir AS SELECT * FROM (SELECT Category.Category, Product.Color, AGG("Sales Amount") AS amount, AGG(Orders) AS orders, AGG("Share of Category") AS share, AGG("Sales YTD") AS ytd FROM contoso_dir GROUP BY ALL);
+
+# the same rows from each format
+query IIIII
+SELECT (SELECT count(*) FROM r_contoso) > 0,
+       (SELECT count(*) FROM (FROM r_contoso EXCEPT ALL FROM r_contoso_file)),
+       (SELECT count(*) FROM (FROM r_contoso_file EXCEPT ALL FROM r_contoso)),
+       (SELECT count(*) FROM (FROM r_contoso EXCEPT ALL FROM r_contoso_dir)),
+       (SELECT count(*) FROM (FROM r_contoso_dir EXCEPT ALL FROM r_contoso));
+----
+true	0	0	0	0
+
+# --- Apache Ossie: aac as its model.bim and as its ossie.yaml, the same model ----------------------
+
+statement ok
+CREATE TABLE dim_calendar AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/dim_calendar.csv', header = true);
+
+statement ok
+CREATE TABLE dim_duid AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/dim_duid.csv', header = true);
+
+statement ok
+CREATE TABLE dim_interconnector AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/dim_interconnector.csv', header = true);
+
+statement ok
+CREATE TABLE dim_month AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/dim_month.csv', header = true);
+
+statement ok
+CREATE TABLE dim_region AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/dim_region.csv', header = true);
+
+statement ok
+CREATE TABLE dim_time AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/dim_time.csv', header = true);
+
+statement ok
+CREATE TABLE fct_curtailment AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/fct_curtailment.csv', header = true);
+
+statement ok
+CREATE TABLE fct_curtailment_region AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/fct_curtailment_region.csv', header = true);
+
+statement ok
+CREATE TABLE fct_interconnector AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/fct_interconnector.csv', header = true);
+
+statement ok
+CREATE TABLE fct_region AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/fct_region.csv', header = true);
+
+statement ok
+CREATE TABLE fct_region_daily AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/fct_region_daily.csv', header = true);
+
+statement ok
+CREATE TABLE fct_region_hourly AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/fct_region_hourly.csv', header = true);
+
+statement ok
+CREATE TABLE fct_summary AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/fct_summary.csv', header = true);
+
+statement ok
+CREATE TABLE fct_summary_daily AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/fct_summary_daily.csv', header = true);
+
+statement ok
+CREATE TABLE fct_summary_hourly AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/aac/data/fct_summary_hourly.csv', header = true);
+
+statement ok
+CREATE SEMANTIC VIEW aac_bim FROM 'third_party/dax-sql/conformance/models/aac/model.bim';
+
+statement ok
+CREATE SEMANTIC VIEW aac_ossie FROM 'third_party/dax-sql/conformance/models/aac/ossie.yaml';
+
+# no metric left out on the way through Ossie
+query I
+SELECT (SELECT count(*) FROM (SHOW SEMANTIC METRICS IN aac_bim)) = (SELECT count(*) FROM (SHOW SEMANTIC METRICS IN aac_ossie));
+----
+true
+
+statement ok
+CREATE TABLE q1_aac_bim AS SELECT * FROM (SELECT dim_duid.Region, AGG("Registered units") AS units, round(AGG("Registered MW"), 6) AS mw FROM aac_bim GROUP BY ALL);
+
+statement ok
+CREATE TABLE q1_aac_ossie AS SELECT * FROM (SELECT dim_duid.Region, AGG("Registered units") AS units, round(AGG("Registered MW"), 6) AS mw FROM aac_ossie GROUP BY ALL);
+
+query III
+SELECT (SELECT count(*) FROM q1_aac_bim) > 0, (SELECT count(*) FROM (FROM q1_aac_bim EXCEPT ALL FROM q1_aac_ossie)), (SELECT count(*) FROM (FROM q1_aac_ossie EXCEPT ALL FROM q1_aac_bim));
+----
+true	0	0
+
+statement ok
+CREATE TABLE q2_aac_bim AS SELECT * FROM (SELECT dim_duid.FuelSourceDescriptor, round(AGG("Generation MWh"), 6) AS mwh FROM aac_bim GROUP BY ALL);
+
+statement ok
+CREATE TABLE q2_aac_ossie AS SELECT * FROM (SELECT dim_duid.FuelSourceDescriptor, round(AGG("Generation MWh"), 6) AS mwh FROM aac_ossie GROUP BY ALL);
+
+query III
+SELECT (SELECT count(*) FROM q2_aac_bim) > 0, (SELECT count(*) FROM (FROM q2_aac_bim EXCEPT ALL FROM q2_aac_ossie)), (SELECT count(*) FROM (FROM q2_aac_ossie EXCEPT ALL FROM q2_aac_bim));
+----
+true	0	0
+
+statement ok
+CREATE TABLE q3_aac_bim AS SELECT * FROM (SELECT dim_duid.Region, dim_duid.TechnologyType, round(AGG("Generation MWh"), 6) AS mwh FROM aac_bim GROUP BY dim_duid.Region, ROLLUP(dim_duid.TechnologyType));
+
+statement ok
+CREATE TABLE q3_aac_ossie AS SELECT * FROM (SELECT dim_duid.Region, dim_duid.TechnologyType, round(AGG("Generation MWh"), 6) AS mwh FROM aac_ossie GROUP BY dim_duid.Region, ROLLUP(dim_duid.TechnologyType));
+
+query III
+SELECT (SELECT count(*) FROM q3_aac_bim) > 0, (SELECT count(*) FROM (FROM q3_aac_bim EXCEPT ALL FROM q3_aac_ossie)), (SELECT count(*) FROM (FROM q3_aac_ossie EXCEPT ALL FROM q3_aac_bim));
+----
+true	0	0
+
+statement ok
+CREATE TABLE q4_aac_bim AS SELECT * FROM (SELECT dim_calendar.date, round(AGG("Curtailed MWh"), 6) AS curtailed, round(AGG("Curtailment rate"), 9) AS rate FROM aac_bim GROUP BY ALL);
+
+statement ok
+CREATE TABLE q4_aac_ossie AS SELECT * FROM (SELECT dim_calendar.date, round(AGG("Curtailed MWh"), 6) AS curtailed, round(AGG("Curtailment rate"), 9) AS rate FROM aac_ossie GROUP BY ALL);
+
+query III
+SELECT (SELECT count(*) FROM q4_aac_bim) > 0, (SELECT count(*) FROM (FROM q4_aac_bim EXCEPT ALL FROM q4_aac_ossie)), (SELECT count(*) FROM (FROM q4_aac_ossie EXCEPT ALL FROM q4_aac_bim));
+----
+true	0	0
+
+# --- what is refused ---------------------------------------------------------------------------
+
+# a file of no model format
+statement error
+CREATE SEMANTIC VIEW wrong FROM 'third_party/dax-sql/README.md';
+----
+a semantic view is read from
+
+# YAML that is not an Ossie model
+statement error
+CREATE SEMANTIC VIEW wrong FROM '.github/workflows/test.yml';
+----
+is not an Apache Ossie model
+
+# TMDL that is not a model
+statement error
+CREATE SEMANTIC VIEW wrong FROM 'test/tools/no_such_model.tmdl';
+----
+no_such_model.tmdl
+
+# a folder with no .tmdl in it
+statement error
+CREATE SEMANTIC VIEW wrong FROM 'test/cli';

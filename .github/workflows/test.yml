@@ -1,0 +1,365 @@
+#
+# Tests the extension the build workflow built last, without building it again: the sqllogictest
+# files in Python duckdb 2.0.0 (.github/scripts/run_tests.py), a contoso script in the official
+# v2.0.0 CLI, and the CLI reading OneLake's Iceberg REST catalog the way the extension will
+# (EXTENSION.md, Where the data comes from). OneLake's identity is an OIDC federated login to
+# Azure, as in dax-sql (repository variables AZURE_CLIENT_ID, AZURE_TENANT_ID, WS_ID, LH_ID).
+#
+name: Test
+on:
+  workflow_run:
+    workflows: ['Main Extension Distribution Pipeline']
+    types: [completed]
+  push:
+    branches: [main]
+    paths: ['test/**', '.github/workflows/test.yml', '.github/scripts/**']
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "The build run whose binaries to test (default: the last successful one on main)"
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # A build of a fork's pull request is not tested here: this job checks out the built commit and
+    # runs its scripts with OneLake's identity (id-token: write).
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      WS_ID: ${{ vars.WS_ID }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      LH_ID: ${{ vars.LH_ID }}
+      # The azure extension's default transport cannot find the CA bundle on GitHub runners:
+      # curl, with the runner's bundle (as aac-dbt-waste's workflows do).
+      AZURE_TRANSPORT_OPTION_TYPE: curl
+      CURL_CA_INFO: /etc/ssl/certs/ca-certificates.crt
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: dax-sql (the test models and data)
+        run: git submodule update --init third_party/dax-sql
+      - name: The built extension
+        run: |
+          set -euo pipefail
+          RUN="${{ github.event.workflow_run.id || inputs.run_id }}"
+          if [ -z "$RUN" ]; then
+            RUN=$(gh run list -R "$GITHUB_REPOSITORY" --workflow MainDistributionPipeline.yml --branch main \
+              --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          fi
+          echo "testing the binaries of build run $RUN"
+          gh run download "$RUN" -R "$GITHUB_REPOSITORY" -p '*linux_amd64*' -D ext
+          EXT=$(find "$PWD/ext" -name 'dax_sql.duckdb_extension' | head -1)
+          test -n "$EXT"
+          echo "EXT=$EXT" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: contoso as TMDL, one file and a folder (test/sql/formats.test reads them)
+        run: node test/tools/bim_to_tmdl.mjs third_party/dax-sql/conformance/models/contoso/model.bim test/models/generated/contoso
+      - name: The sqllogictests
+        run: |
+          pip install -q duckdb==2.0.0
+          python .github/scripts/run_tests.py "$EXT" test/sql/*.test
+      - name: DuckDB v2.0.0 CLI
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          # In cli/: the checkout's duckdb/ is the submodule's place.
+          mkdir -p cli
+          curl -sSfL https://github.com/duckdb/duckdb/releases/download/v2.0.0/duckdb-cli-linux-amd64.tar.gz | tar -xz -C cli
+          ./cli/duckdb -version
+      - name: A semantic view over contoso in the CLI
+        if: ${{ !cancelled() }}
+        run: ./cli/duckdb -unsigned -bail -c "LOAD '$EXT'" -c ".echo on" -c ".read test/cli/contoso.sql"
+      - name: Read OneLake
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
+          echo "::add-mask::$TOKEN"
+          cat > onelake.sql <<SQL
+          SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE';
+          CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$TOKEN');
+          ATTACH '$WS_ID/$LH_ID' AS ol (
+              TYPE iceberg,
+              URI 'https://onelake.table.fabric.microsoft.com/iceberg',
+              TOKEN '$TOKEN',
+              ACCESS_DELEGATION_MODE 'none');
+          SQL
+          TABLES="SELECT schema_name || '.' || table_name FROM duckdb_tables() WHERE database_name = 'ol' ORDER BY ALL"
+          ./cli/duckdb -c ".read onelake.sql" -c "SHOW ALL TABLES"
+          TABLE=$(./cli/duckdb -csv -noheader -c ".read onelake.sql" -c "$TABLES LIMIT 1" | tail -1)
+          test -n "$TABLE"
+          ./cli/duckdb -c ".read onelake.sql" -c "SELECT '$TABLE' AS table_name, count(*) AS row_count FROM ol.$TABLE"
+          rm onelake.sql
+      - name: A Direct Lake view from a .bim in OneLake
+        if: ${{ !cancelled() }}
+        # The deployed nem model (SM_ID), Direct Lake over the lakehouse: its model.bim is put in
+        # the lakehouse's Files, the view is created from there, its tables are read through the
+        # catalog the extension attaches, and its answers are checked against plain SQL over the
+        # same tables, read through an attach of their own. A check that fails stops the run.
+        run: |
+          set -euo pipefail
+          FABRIC_TOKEN=$(.github/scripts/entra_token.sh https://api.fabric.microsoft.com/.default)
+          STORAGE_TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
+          echo "::add-mask::$FABRIC_TOKEN"
+          echo "::add-mask::$STORAGE_TOKEN"
+          export FABRIC_TOKEN STORAGE_TOKEN
+          python .github/scripts/onelake_bim.py "$WS_ID" "${{ vars.SM_ID }}" "$LH_ID" dax_sql_test/nem.bim nem.bim
+          cat > directlake.sql <<SQL
+          LOAD '$EXT';
+          SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE';
+          CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$STORAGE_TOKEN');
+          .echo on
+          CREATE SEMANTIC VIEW nem FROM 'abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID/Files/dax_sql_test/nem.bim';
+          SHOW SEMANTIC VIEWS;
+          SELECT CASE WHEN data_as_of LIKE 'snapshots of %relationships checked%' THEN 'framed: ' || data_as_of
+            ELSE error('nem is not framed: ' || data_as_of) END AS "check" FROM (SHOW SEMANTIC VIEWS) WHERE view_name = 'nem';
+          SELECT CASE WHEN dax_sql_rewrite('SELECT AGG("Registered units") FROM nem') LIKE '%AT (VERSION => %'
+            THEN 'reads the pinned snapshots' ELSE error('the compiled SQL is not pinned') END AS "check";
+          REFRESH SEMANTIC VIEW nem;
+          SELECT dim_duid.Region, AGG("Registered units") AS units, AGG("Registered MW") AS mw FROM nem GROUP BY ALL ORDER BY ALL;
+          SELECT dim_calendar.year, AGG("Curtailed MWh") AS curtailed, AGG("Curtailment rate") AS rate FROM nem GROUP BY ALL ORDER BY ALL;
+          .echo off
+          ATTACH '$WS_ID/$LH_ID' AS ol (TYPE iceberg, URI 'https://onelake.table.fabric.microsoft.com/iceberg', TOKEN '$STORAGE_TOKEN', ACCESS_DELEGATION_MODE 'none');
+          .echo on
+          SELECT CASE WHEN (SELECT AGG("Registered units") FROM nem) = (SELECT count(*) FROM ol.mart.dim_duid)
+            THEN 'Registered units: as plain SQL' ELSE error('Registered units differ from plain SQL') END AS "check";
+          SELECT CASE WHEN abs((SELECT AGG("Curtailed MWh") FROM nem) - (SELECT sum(curtailed_mwh)::DOUBLE FROM ol.mart.fct_curtailment))
+              <= 1e-9 * greatest(1, abs((SELECT sum(curtailed_mwh)::DOUBLE FROM ol.mart.fct_curtailment)))
+            THEN 'Curtailed MWh: as plain SQL' ELSE error('Curtailed MWh differs from plain SQL') END AS "check";
+          WITH v AS (SELECT dim_calendar.year AS year, AGG("Curtailed MWh") AS mwh FROM nem GROUP BY ALL),
+          s AS (SELECT c.year, sum(f.curtailed_mwh)::DOUBLE AS mwh FROM ol.mart.fct_curtailment f
+                LEFT JOIN ol.mart.dim_calendar c USING (date) GROUP BY ALL HAVING sum(f.curtailed_mwh) IS NOT NULL)
+          SELECT CASE WHEN count(*) = 0 THEN 'Curtailed MWh by year: as plain SQL'
+            ELSE error('Curtailed MWh by year differs from plain SQL in ' || count(*) || ' years') END AS "check"
+          FROM v FULL JOIN s ON v.year IS NOT DISTINCT FROM s.year
+          WHERE v.mwh IS NULL OR s.mwh IS NULL OR abs(v.mwh - s.mwh) > 1e-9 * greatest(1, abs(s.mwh));
+          WITH v AS (SELECT dim_duid.Region AS region, AGG("Registered MW") AS mw FROM nem GROUP BY ALL),
+          s AS (SELECT "Region" AS region, sum("RegCapMW")::DOUBLE AS mw FROM ol.mart.dim_duid GROUP BY ALL HAVING sum("RegCapMW") IS NOT NULL)
+          SELECT CASE WHEN count(*) = 0 THEN 'Registered MW by region: as plain SQL'
+            ELSE error('Registered MW by region differs from plain SQL in ' || count(*) || ' regions') END AS "check"
+          FROM v FULL JOIN s ON v.region IS NOT DISTINCT FROM s.region
+          WHERE v.mw IS NULL OR s.mw IS NULL OR abs(v.mw - s.mw) > 1e-9 * greatest(1, abs(s.mw));
+          .read test/directlake/queries.sql
+          SQL
+          ./cli/duckdb -unsigned -bail -c ".read directlake.sql"
+          rm directlake.sql
+      - name: A Direct Lake view kept in a database file
+        if: ${{ !cancelled() }}
+        # Created in one process; another opens the file, loads the extension, and queries the view:
+        # the view comes back from the file and its lakehouse is attached again (the secret is a
+        # persistent one, so the second process has it).
+        run: |
+          set -euo pipefail
+          STORAGE_TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
+          echo "::add-mask::$STORAGE_TOKEN"
+          SETUP="SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE';"
+          ./cli/duckdb -unsigned -bail kept.duckdb -c "LOAD '$EXT'" -c "$SETUP"             -c "CREATE PERSISTENT SECRET onelake_kept (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$STORAGE_TOKEN')"             -c "CREATE SEMANTIC VIEW nem FROM 'abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID/Files/dax_sql_test/nem.bim'"
+          ./cli/duckdb -unsigned -bail kept.duckdb -c "SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE'"             -c "LOAD '$EXT'" -c "SHOW SEMANTIC VIEWS"             -c "SELECT CASE WHEN data_as_of LIKE 'snapshots of %' THEN 'framed again on load' ELSE error('not framed on load: ' || data_as_of) END AS \"check\" FROM (SHOW SEMANTIC VIEWS) WHERE view_name = 'nem'"             -c "SELECT dim_region.Region, AGG(\"Registered units\") AS units FROM nem GROUP BY ALL ORDER BY Region"
+          ./cli/duckdb -c "DROP PERSISTENT SECRET onelake_kept"
+          rm kept.duckdb
+      - name: A Direct Lake view with a credential_chain secret (workload identity)
+        if: ${{ !cancelled() }}
+        # No token pasted and no Azure CLI: GitHub's OIDC token goes in AZURE_FEDERATED_TOKEN_FILE,
+        # the secret is a credential_chain one (CHAIN 'workload_identity'), the azure extension reads
+        # OneLake's files with it, and the extension exchanges it with Entra for the catalog's token.
+        # The view must read OneLake, not fall back to the search path.
+        run: |
+          set -euo pipefail
+          export AZURE_FEDERATED_TOKEN_FILE="$RUNNER_TEMP/oidc.jwt"
+          .github/scripts/entra_token.sh --oidc > "$AZURE_FEDERATED_TOKEN_FILE"
+          BIM="abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID/Files/dax_sql_test/nem.bim"
+          ./cli/duckdb -unsigned -bail -c "LOAD '$EXT'" \
+            -c "SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE'" \
+            -c "CREATE SECRET onelake (TYPE azure, PROVIDER credential_chain, CHAIN 'workload_identity')" \
+            -c "CREATE SEMANTIC VIEW nem FROM '$BIM'" \
+            -c "SELECT view_name, tables_from FROM (SHOW SEMANTIC VIEWS)" \
+            -c "SELECT CASE WHEN tables_from LIKE 'OneLake %' THEN 'reads OneLake' ELSE error('not attached: ' || tables_from) END AS \"check\" FROM (SHOW SEMANTIC VIEWS) WHERE view_name = 'nem'" \
+            -c "SELECT dim_region.Region, AGG(\"Registered units\") AS units, AGG(\"Registered MW\") AS mw FROM nem GROUP BY ALL ORDER BY Region"
+          rm "$AZURE_FEDERATED_TOKEN_FILE"
+      - uses: actions/setup-node@v4
+        if: ${{ !cancelled() }}
+        with:
+          node-version: "24"
+      - name: The extension rewrites as dax-sql does
+        if: ${{ !cancelled() }}
+        # Each query's SQL from the glue in Node, with dax-sql's files as the submodule has them,
+        # against dax_sql_rewrite() in the built extension: they must be the same, byte for byte.
+        run: |
+          set -euo pipefail
+          mkdir -p node_modules/dax-sql
+          ln -s "$PWD/third_party/dax-sql/src" node_modules/dax-sql/src
+          ln -s "$PWD/third_party/dax-sql/formats" node_modules/dax-sql/formats
+          ln -s "$PWD/third_party/yaml" node_modules/yaml
+          STORAGE_TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
+          echo "::add-mask::$STORAGE_TOKEN"
+          CONTOSO=third_party/dax-sql/conformance/models/contoso/model.bim
+          FORMATS="aac_ossie=third_party/dax-sql/conformance/models/aac/ossie.yaml contoso_tmdl=test/models/generated/contoso.tmdl"
+          DRIFT_SETUP="SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE'; CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$STORAGE_TOKEN');" \
+            python .github/scripts/drift.py "$EXT" nem=nem.bim contoso=$CONTOSO $FORMATS -- test/directlake/queries.sql test/drift/contoso.sql test/drift/formats.sql
+      - name: The orphan answers change the SQL, not the rows
+        if: ${{ !cancelled() }}
+        # nem over the live lakehouse, framed: its tables pinned to their snapshots and its
+        # relationships' keys checked there. Each query runs with the orphan answers and without
+        # them at the same snapshots: the rows must be the same. The times go to the job summary.
+        run: |
+          set -euo pipefail
+          STORAGE_TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
+          echo "::add-mask::$STORAGE_TOKEN"
+          export STORAGE_TOKEN
+          SETUP="SET GLOBAL azure_transport_option_type = '$AZURE_TRANSPORT_OPTION_TYPE'; CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$STORAGE_TOKEN');" \
+            python .github/scripts/facts.py "$EXT" nem.bim test/directlake/queries.sql
+
+  # The wasm_eh build in DuckDB-Wasm, in headless Chromium: what works in the browser and what
+  # does not (test/wasm/probe.js). DuckDB-Wasm on DuckDB 2.0 is not on npm yet: its build comes
+  # from DuckDB-Wasm's own CI (run DUCKDB_WASM_RUN of duckdb/duckdb-wasm, main on DuckDB v2.0.0).
+  wasm:
+    # A build of a fork's pull request is not tested here: this job checks out the built commit and
+    # runs its scripts with OneLake's identity (id-token: write).
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      WS_ID: ${{ vars.WS_ID }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      LH_ID: ${{ vars.LH_ID }}
+      DUCKDB_WASM_RUN: ${{ vars.DUCKDB_WASM_RUN || '39794117824' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: dax-sql (the test models and data)
+        run: git submodule update --init third_party/dax-sql
+      - name: The built extension (wasm_eh)
+        run: |
+          set -euo pipefail
+          RUN="${{ github.event.workflow_run.id || inputs.run_id }}"
+          if [ -z "$RUN" ]; then
+            RUN=$(gh run list -R "$GITHUB_REPOSITORY" --workflow MainDistributionPipeline.yml --branch main \
+              --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          fi
+          echo "testing the binaries of build run $RUN"
+          gh run download "$RUN" -R "$GITHUB_REPOSITORY" -p '*wasm_eh*' -D ext
+          mkdir -p site/ext
+          cp "$(find ext -name 'dax_sql.duckdb_extension.wasm' | head -1)" site/ext/
+          ls -l site/ext
+      - name: The extensions DuckDB publishes for wasm on v2.0.0
+        run: |
+          for e in httpfs json parquet iceberg avro azure; do
+            printf '%-8s %s\n' "$e" "$(curl -s -o /dev/null -w '%{http_code}' -I https://extensions.duckdb.org/v2.0.0/wasm_eh/$e.duckdb_extension.wasm)"
+          done
+      - name: DuckDB-Wasm on DuckDB 2.0 (from DuckDB-Wasm's CI)
+        run: |
+          set -euo pipefail
+          gh run download "$DUCKDB_WASM_RUN" -R duckdb/duckdb-wasm -n duckdb-wasm-packages-loadable -D dw
+          unzip -q dw/duckdb-wasm-packages.zip 'packages/duckdb-wasm/dist/*' -d dw
+          mkdir -p site/duckdb-wasm
+          cp -r dw/packages/duckdb-wasm/dist site/duckdb-wasm/
+          grep -o '"version": *"[^"]*"' <(unzip -p dw/duckdb-wasm-packages.zip packages/duckdb-wasm/package.json)
+          # DuckDB's own wasm extensions on v2.0.0, served as the repository this build autoloads
+          # from (/ext/<its build name>/wasm_eh/), so httpfs, iceberg and avro load as they will
+          # from extensions.duckdb.org once DuckDB-Wasm is released on v2.0.0.
+          mkdir -p site/ext/d54cbbe3df/wasm_eh
+          for e in httpfs iceberg avro parquet json; do
+            curl -sSfL --compressed -o "site/ext/d54cbbe3df/wasm_eh/$e.duckdb_extension.wasm" \
+              "https://extensions.duckdb.org/v2.0.0/wasm_eh/$e.duckdb_extension.wasm"
+          done
+          # That build is DuckDB v2.0.0's commit, but untagged: it calls itself d54cbbe3df, and refuses
+          # an extension stamped v2.0.0. For this test only, the copies here are stamped with that
+          # name (the 32-byte duckdb_version field of their metadata, before the 256-byte signature;
+          # the page allows unsigned extensions). A DuckDB-Wasm release on v2.0.0 takes them as built.
+          python - site/ext/dax_sql.duckdb_extension.wasm site/ext/d54cbbe3df/wasm_eh/*.wasm <<'PY'
+          import sys
+          for p in sys.argv[1:]:
+              b = bytearray(open(p, 'rb').read())
+              end = len(b) - 256
+              old = bytes(b[end - 96:end - 64]).rstrip(b'\0')
+              assert old == b'v2.0.0', (p, old)
+              b[end - 96:end - 64] = b'd54cbbe3df'.ljust(32, b'\0')
+              open(p, 'wb').write(b)
+              print(p, 'duckdb_version:', old.decode(), '->', 'd54cbbe3df')
+          PY
+      - name: The site
+        run: |
+          set -euo pipefail
+          mkdir -p site/data/contoso site/data/aac site/page
+          cp third_party/dax-sql/conformance/models/aac/ossie.yaml site/data/aac/
+          cp third_party/dax-sql/conformance/models/contoso/model.bim site/data/contoso/
+          cp -r third_party/dax-sql/conformance/models/contoso/data site/data/contoso/
+          cp test/wasm/index.html test/wasm/probe.js site/page/
+          cp test/wasm/sw.js site/sw.js
+          FABRIC_TOKEN=$(.github/scripts/entra_token.sh https://api.fabric.microsoft.com/.default)
+          STORAGE_TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
+          echo "::add-mask::$FABRIC_TOKEN"
+          echo "::add-mask::$STORAGE_TOKEN"
+          FABRIC_TOKEN=$FABRIC_TOKEN STORAGE_TOKEN=$STORAGE_TOKEN \
+            python .github/scripts/onelake_bim.py "$WS_ID" "${{ vars.SM_ID }}" "$LH_ID" dax_sql_test/nem.bim site/data/nem.bim
+      - name: A DuckDB copy of the nem lakehouse
+        # The tables the nem model reads, each at the schema.entity its partition names (at most
+        # 100,000 rows of each), in a native DuckDB file the browser attaches over HTTP.
+        env:
+          AZURE_TRANSPORT_OPTION_TYPE: curl
+          CURL_CA_INFO: /etc/ssl/certs/ca-certificates.crt
+        run: |
+          set -euo pipefail
+          mkdir -p cli
+          curl -sSfL https://github.com/duckdb/duckdb/releases/download/v2.0.0/duckdb-cli-linux-amd64.tar.gz | tar -xz -C cli
+          STORAGE_TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
+          echo "::add-mask::$STORAGE_TOKEN"
+          python - "$STORAGE_TOKEN" > copy.sql <<'PY'
+          import json, sys
+          token = sys.argv[1]
+          model = json.load(open('site/data/nem.bim', encoding='utf-8-sig'))['model']
+          print("SET GLOBAL azure_transport_option_type = 'curl';")
+          print(f"CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '{token}');")
+          ws, lh = '${{ vars.WS_ID }}', '${{ vars.LH_ID }}'
+          print(f"ATTACH '{ws}/{lh}' AS ol (TYPE iceberg, URI 'https://onelake.table.fabric.microsoft.com/iceberg', TOKEN '{token}', ACCESS_DELEGATION_MODE 'none');")
+          print("ATTACH 'site/data/nem.duckdb' AS lakehouse_copy;")
+          tables = [t['partitions'][0]['source'] for t in model['tables'] if t.get('partitions', [{}])[0].get('source', {}).get('entityName')]
+          for schema in sorted({s.get('schemaName', 'dbo') for s in tables}):
+              print(f'CREATE SCHEMA lakehouse_copy."{schema}";')
+          for s in tables:
+              q = f'"{s.get("schemaName", "dbo")}"."{s["entityName"]}"'
+              print(f'CREATE TABLE lakehouse_copy.{q} AS SELECT * FROM ol.{q} LIMIT 100000;')
+          PY
+          ./cli/duckdb -bail -c ".read copy.sql"
+          rm copy.sql
+          ls -l site/data/nem.duckdb
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: The probe in headless Chromium
+        run: |
+          set -euo pipefail
+          npm install --no-save --silent playwright@1.49.1
+          npx playwright install --with-deps chromium > /dev/null
+          python -m http.server 8080 --directory site > /dev/null 2>&1 &
+          sleep 2
+          ONELAKE_TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
+          echo "::add-mask::$ONELAKE_TOKEN"
+          ONELAKE_TOKEN=$ONELAKE_TOKEN node test/wasm/run.mjs http://localhost:8080/page/index.html wasm-report.json
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: wasm-report
+          path: wasm-report.json

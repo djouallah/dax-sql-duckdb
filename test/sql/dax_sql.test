@@ -1,0 +1,244 @@
+# name: test/sql/dax_sql.test
+# description: semantic views from a .bim, queried and inspected; each answer checked against plain SQL over the same tables
+# group: [sql]
+
+require dax_sql
+
+query I
+SELECT dax_sql_version() IS NOT NULL;
+----
+true
+
+# dax-sql's contoso conformance model and its data, as the model's tables
+statement ok
+CREATE TABLE "Sales" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Sales.csv', header = true, types = {'Amount': 'DECIMAL(18,4)'});
+
+statement ok
+CREATE TABLE "Product" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Product.csv', header = true);
+
+statement ok
+CREATE TABLE "Category" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Category.csv', header = true);
+
+statement ok
+CREATE TABLE "Customer" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Customer.csv', header = true);
+
+statement ok
+CREATE TABLE "Date" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Date.csv', header = true);
+
+statement ok
+CREATE TABLE "Returns" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Returns.csv', header = true);
+
+statement ok
+CREATE TABLE "CityTarget" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/CityTarget.csv', header = true);
+
+statement ok
+CREATE TABLE "Staff" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Staff.csv', header = true);
+
+# --- creating ---------------------------------------------------------------------------------
+
+statement ok
+CREATE SEMANTIC VIEW contoso FROM 'third_party/dax-sql/conformance/models/contoso/model.bim';
+
+query III
+SELECT database_name, schema_name, view_name FROM (SHOW SEMANTIC VIEWS);
+----
+memory	main	contoso
+
+# Its tables are the search path's: nothing to pin, so no orphan answers (EXTENSION.md, Facts
+# from the data), and REFRESH leaves it as it is.
+query T
+SELECT data_as_of FROM (SHOW SEMANTIC VIEWS);
+----
+current data (no OneLake table to pin)
+
+query TT
+REFRESH SEMANTIC VIEW contoso;
+----
+contoso	current data (no OneLake table to pin)
+
+query T
+SELECT dax_sql_facts('contoso');
+----
+{"pins":{},"orphans":{}}
+
+statement error
+REFRESH SEMANTIC VIEW nothing_here;
+----
+semantic view nothing_here does not exist
+
+statement error
+CREATE SEMANTIC VIEW contoso FROM 'third_party/dax-sql/conformance/models/contoso/model.bim';
+----
+semantic view contoso already exists
+
+statement ok
+CREATE SEMANTIC VIEW IF NOT EXISTS contoso FROM 'third_party/dax-sql/conformance/models/contoso/model.bim';
+
+statement ok
+CREATE OR REPLACE SEMANTIC VIEW contoso FROM 'third_party/dax-sql/conformance/models/contoso/model.bim';
+
+# the definition is stored in the schema, once
+query II
+SELECT view_name, length(definition) > 0 FROM dax_sql_semantic_views;
+----
+contoso	true
+
+statement error
+CREATE SEMANTIC VIEW missing FROM 'third_party/dax-sql/conformance/models/contoso/nothing.bim';
+----
+nothing.bim
+
+statement error
+CREATE SEMANTIC VIEW wrong FROM 'third_party/dax-sql/conformance/models/contoso/data/Sales.csv';
+----
+a semantic view is read from a .bim (TMSL), a .tmdl or a folder of them (TMDL), or a .yaml / .yml (Apache Ossie)
+
+# --- querying ---------------------------------------------------------------------------------
+
+# a whole statement that is a model query
+query I
+SELECT AGG(Orders) FROM contoso;
+----
+<REGEX>:[1-9][0-9]*
+
+query I
+SELECT (SELECT AGG(Orders) FROM contoso) = (SELECT count(*) FROM "Sales");
+----
+true
+
+# grouped, against the same groups in plain SQL (a sale with no product is the blank row: NULL)
+query I
+SELECT count(*) FROM (
+  (SELECT Color, AGG(Orders) AS orders FROM contoso GROUP BY ALL)
+  EXCEPT
+  (SELECT p."Color", count(*) FROM "Sales" s LEFT JOIN "Product" p USING ("ProductKey") GROUP BY ALL)
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT p."Color", count(*) FROM "Sales" s LEFT JOIN "Product" p USING ("ProductKey") GROUP BY ALL)
+  EXCEPT
+  (SELECT Color, AGG(Orders) AS orders FROM contoso GROUP BY ALL)
+);
+----
+0
+
+# in a CTE, joined with a table
+query I
+WITH m AS (SELECT Product.ProductKey, AGG("Sales Amount") AS amount FROM contoso GROUP BY ALL)
+SELECT bool_and(abs(m.amount - t.amount) < 0.01) FROM m JOIN (SELECT "ProductKey", sum("Amount") AS amount FROM "Sales" GROUP BY ALL) t USING ("ProductKey");
+----
+true
+
+# in a subquery, with WHERE and HAVING
+query I
+SELECT count(*) > 0 FROM (SELECT Category.Category, AGG(Quantity) AS q FROM contoso WHERE Product.Color <> 'Red' GROUP BY ALL HAVING q > 0);
+----
+true
+
+# a parenthesized UNION arm, and IN
+query I
+SELECT count(*) > 1 FROM ((SELECT Color FROM contoso GROUP BY ALL) UNION ALL (SELECT 'x'));
+----
+true
+
+query I
+SELECT count(*) = (SELECT count(*) FROM "Product" WHERE "ProductKey" IN (SELECT "ProductKey" FROM "Sales"))
+FROM "Product" WHERE "ProductKey" IN (SELECT Product.ProductKey FROM contoso WHERE Product.ProductKey IS NOT NULL GROUP BY ALL HAVING AGG(Orders) > 0);
+----
+true
+
+# bracketed names, as dax-sql takes them
+query I
+SELECT (SELECT AGG([Sales Amount]) FROM contoso) > 0;
+----
+true
+
+statement error
+SELECT * FROM contoso;
+----
+
+statement error
+SELECT * FROM "Sales" JOIN contoso ON true;
+----
+the model is not a table
+
+# --- inspecting -------------------------------------------------------------------------------
+
+query II
+SELECT column_type, extra FROM (DESCRIBE contoso) WHERE column_name = 'Product.Color';
+----
+VARCHAR	column
+
+query II
+SELECT column_type, extra FROM (DESCRIBE contoso) WHERE column_name = 'Orders';
+----
+BIGINT	measure
+
+query I
+SELECT count(*) > 0 FROM (DESCRIBE contoso);
+----
+true
+
+query III
+SELECT table_name, data_type, expression FROM (SHOW SEMANTIC METRICS IN contoso) WHERE name = 'Sales Amount';
+----
+Sales	DOUBLE	SUM(Sales[Amount])
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC DIMENSIONS IN contoso) WHERE table_name = 'Product' AND name = 'Color';
+----
+1
+
+# the columns that filter Orders: Product's do, Staff's (no relationship) do not
+query I
+SELECT count(*) FROM (SHOW SEMANTIC DIMENSIONS IN contoso FOR METRIC Orders) WHERE table_name = 'Product' AND name = 'Color';
+----
+1
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC DIMENSIONS IN contoso FOR METRIC Orders) WHERE table_name = 'Staff';
+----
+0
+
+statement ok
+SHOW SEMANTIC METRICS IN contoso;
+
+statement ok
+DESCRIBE contoso;
+
+statement error
+SHOW SEMANTIC METRICS IN nothing;
+----
+semantic view nothing does not exist
+
+# a table not a view is described as DuckDB does
+query I
+SELECT count(*) FROM (DESCRIBE "Product");
+----
+5
+
+# --- dropping ---------------------------------------------------------------------------------
+
+statement ok
+DROP SEMANTIC VIEW contoso;
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS);
+----
+0
+
+query I
+SELECT count(*) FROM dax_sql_semantic_views;
+----
+0
+
+statement ok
+DROP SEMANTIC VIEW IF EXISTS contoso;
+
+statement error
+DROP SEMANTIC VIEW contoso;
+----
+semantic view contoso does not exist

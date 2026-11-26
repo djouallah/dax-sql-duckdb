@@ -1,0 +1,157 @@
+# name: test/sql/composition.test
+# description: the extension's part, not the compiler's: model queries wherever DuckDB SQL takes a query, several views, schemas, names in text, and dax_sql_rewrite
+# group: [sql]
+
+require dax_sql
+
+statement ok
+CREATE TABLE "Sales" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Sales.csv', header = true, types = {'Amount': 'DECIMAL(18,4)'});
+
+statement ok
+CREATE TABLE "Product" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Product.csv', header = true);
+
+statement ok
+CREATE TABLE "Category" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Category.csv', header = true);
+
+statement ok
+CREATE TABLE "Customer" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Customer.csv', header = true);
+
+statement ok
+CREATE TABLE "Date" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Date.csv', header = true);
+
+statement ok
+CREATE TABLE "Returns" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Returns.csv', header = true);
+
+statement ok
+CREATE TABLE "CityTarget" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/CityTarget.csv', header = true);
+
+statement ok
+CREATE TABLE "Staff" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Staff.csv', header = true);
+
+statement ok
+CREATE SEMANTIC VIEW contoso FROM 'third_party/dax-sql/conformance/models/contoso/model.bim';
+
+# --- several views ----------------------------------------------------------------------------
+
+statement ok
+CREATE SEMANTIC VIEW sales_copy FROM 'third_party/dax-sql/conformance/models/contoso/model.bim';
+
+# two views in one statement
+query I
+SELECT (SELECT AGG(Orders) FROM contoso) = (SELECT AGG(Orders) FROM sales_copy);
+----
+true
+
+# a view in another schema, with its own definitions table
+statement ok
+CREATE SCHEMA other;
+
+statement ok
+CREATE SEMANTIC VIEW other.elsewhere FROM 'third_party/dax-sql/conformance/models/contoso/model.bim';
+
+query II
+SELECT schema_name, view_name FROM (SHOW SEMANTIC VIEWS) ORDER BY view_name;
+----
+main	contoso
+other	elsewhere
+main	sales_copy
+
+query I
+SELECT count(*) FROM other.dax_sql_semantic_views;
+----
+1
+
+query I
+SELECT (SELECT AGG(Orders) FROM elsewhere) = (SELECT AGG(Orders) FROM contoso);
+----
+true
+
+# --- a model query after a prefix -------------------------------------------------------------
+
+statement ok
+CREATE TABLE snapshot AS SELECT Color, AGG(Orders) AS orders FROM contoso GROUP BY ALL;
+
+statement ok
+INSERT INTO snapshot SELECT Color, AGG(Orders) AS orders FROM contoso GROUP BY ALL;
+
+query I
+SELECT count(*) = 2 * (SELECT count(*) FROM (SELECT Color FROM contoso GROUP BY ALL)) FROM snapshot;
+----
+true
+
+statement ok
+EXPLAIN SELECT Color, AGG(Orders) AS orders FROM contoso GROUP BY ALL;
+
+query I
+SELECT column_name FROM (DESCRIBE SELECT Color, AGG(Orders) AS orders FROM contoso GROUP BY ALL) ORDER BY column_name;
+----
+Color
+orders
+
+statement ok
+COPY (SELECT Color, AGG(Orders) AS orders FROM contoso GROUP BY ALL) TO '__TEST_DIR__/orders.csv';
+
+query I
+SELECT count(*) = (SELECT count(*) FROM snapshot) / 2 FROM read_csv('__TEST_DIR__/orders.csv');
+----
+true
+
+# --- around the result: windows, QUALIFY, joins -----------------------------------------------
+
+query I
+SELECT count(*) FROM (SELECT * FROM (SELECT Color, AGG("Sales Amount") AS amount FROM contoso GROUP BY ALL) QUALIFY rank() OVER (ORDER BY amount DESC) = 1);
+----
+1
+
+query I
+SELECT count(*) > 0 FROM (SELECT Product.ProductKey, AGG(Orders) AS orders FROM contoso GROUP BY ALL) m JOIN "Product" p ON p."ProductKey" = m.ProductKey;
+----
+true
+
+# --- names in strings, comments, and any case --------------------------------------------------
+
+query I
+SELECT 'SELECT AGG(Orders) FROM contoso' AS text;
+----
+SELECT AGG(Orders) FROM contoso
+
+query I
+SELECT 1 -- FROM contoso
+;
+----
+1
+
+query I
+select (select agg(orders) from CONTOSO) = (select count(*) from "Sales");
+----
+true
+
+# --- dax_sql_rewrite: the SQL a text runs as, without running it -------------------------------
+
+query I
+SELECT dax_sql_rewrite('SELECT 42');
+----
+SELECT 42
+
+query I
+SELECT dax_sql_rewrite('SELECT AGG(Orders) FROM contoso') LIKE '%"Sales"%';
+----
+true
+
+# a dry run: the rewrite of a DROP drops nothing
+query I
+SELECT dax_sql_rewrite('DROP SEMANTIC VIEW contoso') LIKE 'DELETE FROM%';
+----
+true
+
+query I
+SELECT count(*) FROM (SHOW SEMANTIC VIEWS) WHERE view_name = 'contoso';
+----
+1
+
+# --- the compiler's errors reach DuckDB --------------------------------------------------------
+
+statement error
+SELECT AGG("No Such Measure") FROM contoso;
+----
+No Such Measure

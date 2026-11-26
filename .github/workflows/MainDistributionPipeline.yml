@@ -1,0 +1,35 @@
+#
+# Builds the extension with DuckDB's distribution pipeline. The tests run in the Test workflow,
+# against the binaries this one uploads, so a change to the tests needs no build.
+#
+name: Main Extension Distribution Pipeline
+on:
+  push:
+    paths-ignore: ['test/**', '**.md', '.github/workflows/test.yml', '.github/scripts/**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' && github.sha || '' }}
+  cancel-in-progress: true
+
+jobs:
+  duckdb-stable-build:
+    name: Build extension binaries
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
+    with:
+      duckdb_version: v2.0.0
+      ci_tools_version: v2.0-cyanoptera
+      extension_name: dax_sql
+      # The CLI on Windows and Linux, and wasm_eh for DuckDB-Wasm; the other platforms come later.
+      exclude_archs: 'wasm_mvp;wasm_threads;linux_arm64;linux_amd64_musl;linux_arm64_musl;osx_amd64;osx_arm64;windows_arm64;windows_amd64_mingw'
+      skip_tests: true
+
+  code-quality-check:
+    name: Code Quality Check
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v2.0-cyanoptera
+    with:
+      duckdb_version: v2.0.0
+      ci_tools_version: v2.0-cyanoptera
+      extension_name: dax_sql
+      format_checks: 'format'

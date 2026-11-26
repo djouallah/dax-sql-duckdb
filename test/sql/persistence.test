@@ -1,0 +1,37 @@
+# name: test/sql/persistence.test
+# description: a semantic view is stored in its database, and is there again when the database is opened again
+# group: [sql]
+
+require dax_sql
+
+load __TEST_DIR__/dax_sql_persistence.db
+
+statement ok
+CREATE SEMANTIC VIEW kept FROM 'third_party/dax-sql/conformance/models/contoso/model.bim';
+
+statement ok
+CREATE SEMANTIC VIEW kept_ossie FROM 'third_party/dax-sql/conformance/models/aac/ossie.yaml';
+
+# a folder of TMDL files, stored as its files' texts (test/tools/bim_to_tmdl.mjs writes it in CI)
+statement ok
+CREATE SEMANTIC VIEW kept_tmdl FROM 'test/models/generated/contoso/definition';
+
+restart
+
+query I
+SELECT view_name FROM (SHOW SEMANTIC VIEWS) ORDER BY ALL;
+----
+kept
+kept_ossie
+kept_tmdl
+
+query I
+SELECT count(*) > 0 FROM (SHOW SEMANTIC METRICS IN kept);
+----
+true
+
+query II
+SELECT (SELECT count(*) FROM (SHOW SEMANTIC METRICS IN kept_ossie)) > 0,
+       (SELECT count(*) FROM (SHOW SEMANTIC METRICS IN kept_tmdl)) = (SELECT count(*) FROM (SHOW SEMANTIC METRICS IN kept));
+----
+true	true

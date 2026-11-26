@@ -1,0 +1,14 @@
+[submodule "duckdb"]
+	path = duckdb
+	url = https://github.com/duckdb/duckdb
+	branch = main
+[submodule "extension-ci-tools"]
+	path = extension-ci-tools
+	url = https://github.com/duckdb/extension-ci-tools
+	branch = main
+[submodule "third_party/dax-sql"]
+	path = third_party/dax-sql
+	url = https://github.com/djouallah/dax-sql
+[submodule "third_party/quickjs-ng"]
+	path = third_party/quickjs-ng
+	url = https://github.com/quickjs-ng/quickjs
