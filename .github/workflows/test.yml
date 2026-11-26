@@ -224,7 +224,7 @@ jobs:
           STORAGE_TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
           echo "::add-mask::$STORAGE_TOKEN"
           export STORAGE_TOKEN
-            python .github/scripts/facts.py "$EXT" nem.bim test/directlake/queries.sql
+          SETUP="CREATE SECRET onelake (TYPE azure, PROVIDER access_token, ACCESS_TOKEN '$STORAGE_TOKEN');"             python .github/scripts/facts.py "$EXT" nem.bim test/directlake/queries.sql
 
   # The wasm_eh build in DuckDB-Wasm, in headless Chromium: what works in the browser and what
   # does not (test/wasm/probe.js). DuckDB-Wasm on DuckDB 2.0 is not on npm yet: its build comes

@@ -1,4 +1,4 @@
--- The nem model as Apache Ossie YAML, in the lakehouse's Files, over the lakehouse's Iceberg
+-- The nem model as Apache Ossie YAML, in the lakehouse's Context folder as Fabric lays out semantic views (Context/Semantic Views/<view>/), over the lakehouse's Iceberg
 -- catalog attached by hand. The YAML's datasets name mart.<table>, and its DirectLake expression
 -- names no lakehouse yet ({WS_ID}, {LH_ID} are filled in at deploy), so the view reads its tables
 -- from the search path: the catalog is attached and made current first. The view is created in
@@ -18,7 +18,7 @@ ATTACH '${WS_ID}/${LH_ID}' AS nem_lake (TYPE iceberg, URI 'https://onelake.table
 -- The lakehouse's tables first, then the view over them.
 USE nem_lake.mart;
 CREATE SEMANTIC VIEW memory.main.nem_yaml
-    FROM 'abfss://${WS_ID}@onelake.dfs.fabric.microsoft.com/${LH_ID}/Files/semantic_model/ossie.yaml';
+    FROM 'abfss://${WS_ID}@onelake.dfs.fabric.microsoft.com/${LH_ID}/Context/Semantic Views/nem/nem.yaml';
 
 SELECT view_name, path, tables_from, data_as_of FROM (SHOW SEMANTIC VIEWS);
 SELECT count(*) AS metrics FROM (SHOW SEMANTIC METRICS IN nem_yaml);
