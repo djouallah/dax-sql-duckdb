@@ -4,7 +4,15 @@
 in plain SQL. Its measures are compiled to DuckDB SQL by
 [dax-sql](https://github.com/djouallah/dax-sql), embedded in the extension.
 
-In a Fabric Python notebook ([test/integrations/ossie.ipynb](test/integrations/ossie.ipynb)):
+In a Fabric Python notebook ([test/integrations/ossie.ipynb](test/integrations/ossie.ipynb)),
+first upgrade DuckDB, since the extension needs DuckDB 2.0.1:
+
+```python
+%pip install duckdb --upgrade
+notebookutils.session.restartPython()
+```
+
+Then:
 
 ```python
 import duckdb
