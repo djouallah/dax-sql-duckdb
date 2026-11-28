@@ -65,6 +65,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # In a step of its own: every Python step after it needs it, whichever step fails first
+      - name: The duckdb Python package of the extension's DuckDB version
+        run: pip install -q duckdb==2.0.1
       - name: The test fixtures are what the tools write (test/models/fixtures)
         # formats.test and persistence.test read contoso as TMDL and aac's ossie.yaml as a Fabric
         # semantic view's folder of YAML files. They are committed, so the sqllogictests need no step
@@ -82,9 +85,8 @@ jobs:
           { echo 'version: 0.3.0.dev0'; echo 'metrics: []'; } > $G/aac_ossie_unnamed/unnamed.yaml
           diff -r test/models/fixtures $G
       - name: The sqllogictests
-        run: |
-          pip install -q duckdb==2.0.1
-          python .github/scripts/run_tests.py "$EXT" test/sql/*.test
+        if: ${{ !cancelled() }}
+        run: python .github/scripts/run_tests.py "$EXT" test/sql/*.test
       - name: The Python client, as a notebook uses it (test/integrations/python_client.py)
         if: ${{ !cancelled() }}
         run: python test/integrations/python_client.py "$EXT"
