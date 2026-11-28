@@ -42,10 +42,33 @@ function host(name) {
 function oneLake(bim) {
   const tables = new Map();
   for (const [table, l] of directLakeTables(bim)) {
-    if (l.inWorkspace || !l.workspace) continue;
-    tables.set(table, { ...l, catalog: `dax_sql_onelake_${l.item.replace(/-/g, '')}` });
+    // A table read through a Fabric SQL endpoint (viaSqlEndpoint) names no lakehouse to attach: it
+    // is read from the search path, as a table of no lakehouse is (#9).
+    if (l.inWorkspace || !l.workspace || !l.item || l.viaSqlEndpoint) continue;
+    tables.set(table, { ...l, catalog: lakeCatalogs.get(lc(l.item)) ?? `dax_sql_onelake_${l.item.replace(/-/g, '')}` });
   }
   return tables;
+}
+
+// The catalog each lakehouse is read from (its GUID, lower case → the catalog), as the extension
+// chose it: the lakehouse's name in Fabric, or the GUID name when that is not found. Every view
+// over the lakehouse reads it there.
+const lakeCatalogs = new Map();
+
+function setCatalog(item, catalog) {
+  lakeCatalogs.set(lc(item), catalog);
+  for (const h of hosts.values()) {
+    if (!h.lake?.size) continue;
+    let changed = false;
+    for (const l of h.lake.values()) {
+      if (lc(l.item) === lc(item) && l.catalog !== catalog) {
+        l.catalog = catalog;
+        changed = true;
+      }
+    }
+    if (changed) build(h);
+  }
+  return '';
 }
 
 // A model's file as TMSL, by dax-sql's readModel (the format its path says, the BOM dropped, a
@@ -54,12 +77,14 @@ function oneLake(bim) {
 // semantic view's folder of Apache Ossie files, merged as Fabric merges them).
 function toTmsl(path, text) {
   let input = String(text);
-  if (!/\.(bim|tmdl|ya?ml)$/i.test(path)) {
-    try {
-      const files = JSON.parse(input);
-      if (files && typeof files === 'object' && !Array.isArray(files)) input = files;
-    } catch {}
-  }
+  // A folder is the extension's JSON of its files' texts (an object of strings); a .bim is JSON too,
+  // but never all strings. readModel decides the format of either (#11).
+  try {
+    const files = JSON.parse(input);
+    if (files && typeof files === 'object' && !Array.isArray(files) && Object.values(files).every(v => typeof v === 'string')) {
+      input = files;
+    }
+  } catch {}
   return readModel(path, input, { parseYaml }).bim;
 }
 
@@ -73,13 +98,15 @@ function build(h) {
   const options = {};
   const pins = h.frame?.pins ?? {};
   // A view kept in a database other than the session's first (a file attached later) reads its
-  // other tables there, not on the search path. A shim until djouallah/dax-sql#31: the default
-  // name, as dax-sql writes it, qualified with that database (and the view's schema if it has none).
-  const own = t => (h.own ? `${ident(h.own)}.${ident(t.source?.schema || h.schema)}.${ident(t.source?.entity ?? t.name)}` : undefined);
+  // other tables there, not on the search path: dax-sql's default relation (`fallback`) qualified
+  // with that database, and with the view's schema when the table's source names none, so that
+  // DuckDB reads it as catalog.schema.table.
+  const own = (t, fallback) =>
+    h.own ? `${ident(h.own)}.${t.source?.schema ? '' : `${ident(h.schema)}.`}${fallback}` : undefined;
   if (h.lake.size && !h.offline) {
-    options.tableSource = t => {
+    options.tableSource = (t, fallback) => {
       const l = h.lake.get(lc(t.name));
-      if (!l) return own(t);
+      if (!l) return own(t, fallback);
       const name = `${ident(l.catalog)}.${ident(l.schema)}.${ident(l.entity)}`;
       const at = pins[lc(t.name)];
       return at == null ? name : `(SELECT * FROM ${name} AT (VERSION => ${at}))`;
@@ -181,8 +208,8 @@ function frameSql(name) {
 // The snapshots frameSql read (tab-separated, in its order) and when: the view is pinned to them.
 // Returns the statement that checks the data at those snapshots (dax-sql's factsCheck: which
 // relationships' many sides hold keys their one side lacks, which text columns hold trailing
-// spaces), '' when nothing can be checked. An answer counts only when every table it reads is
-// pinned (factsCheck's `tables`): a table read as it is now could change under it.
+// spaces), '' when nothing can be checked. Only the facts that read pinned tables alone are
+// checked (factsCheck's `tables`): a table read as it is now could change under its answer.
 function frame(name, row, at) {
   const h = host(name);
   const vals = String(row).split('\t');
@@ -192,23 +219,20 @@ function frame(name, row, at) {
   });
   h.frame = { at, pins, facts: {}, check: null };
   build(h);
-  const { sql, read, tables } = h.compiler.factsCheck();
-  const pinned = list => (list ?? []).every(t => pins[lc(t)]);
-  const counts = Object.values(tables).some(byKey => Object.values(byKey).some(pinned));
-  h.frame.check = { read, tables, pinned };
-  return counts ? sql : '';
+  const vouched = (h.bim?.model?.tables ?? []).map(t => t.name).filter(n => pins[lc(n)]);
+  const { sql, read } = h.compiler.factsCheck({ tables: vouched });
+  h.frame.check = { read };
+  return sql ?? '';
 }
 
 // The row of the statement frame returned, read by dax-sql (factsCheck's read): the facts the
-// view's compiler is given, those of tables not pinned left out.
+// view's compiler is given (only those of pinned tables were checked).
 function factsFound(name, row) {
   const h = host(name);
-  const { read, tables, pinned } = h.frame.check;
-  const found = read(String(row).split('\t'));
+  const found = h.frame.check.read(String(row).split('\t'));
   const facts = {};
   for (const kind of ['orphans', 'trailingSpaces']) {
-    const kept = Object.entries(found[kind] ?? {}).filter(([key]) => pinned(tables[kind]?.[key]));
-    if (kept.length) facts[kind] = Object.fromEntries(kept);
+    if (Object.keys(found[kind] ?? {}).length) facts[kind] = found[kind];
   }
   h.frame.facts = facts;
   build(h);
@@ -233,11 +257,17 @@ function frameFailed(name, step, error) {
 function facts(name) {
   const h = host(name);
   const f = h.frame?.facts ?? {};
-  return JSON.stringify({ pins: h.frame?.pins ?? {}, orphans: f.orphans ?? {}, trailingSpaces: f.trailingSpaces ?? {} });
+  // the catalog each lakehouse is read from (its name in Fabric, or the session's own tables)
+  const catalogs = Object.fromEntries([...(h.lake?.values() ?? [])].map(l => [l.item, l.catalog]));
+  return JSON.stringify({
+    pins: h.frame?.pins ?? {}, orphans: f.orphans ?? {}, trailingSpaces: f.trailingSpaces ?? {},
+    ...(Object.keys(catalogs).length ? { catalogs } : {}),
+  });
 }
 function setFacts(name, json) {
-  const h = host(name);
   const f = JSON.parse(json);
+  for (const [item, catalog] of Object.entries(f.catalogs ?? {})) setCatalog(item, catalog);
+  const h = host(name);
   const given = {};
   if (f.orphans && Object.keys(f.orphans).length) given.orphans = f.orphans;
   if (f.trailingSpaces && Object.keys(f.trailingSpaces).length) given.trailingSpaces = f.trailingSpaces;
@@ -260,7 +290,9 @@ function dataAsOf(h) {
   const unpinned = lakeTables(h).filter(t => !(t in f.pins));
   const read = unpinned.length ? ` (no snapshot, read as they are now: ${unpinned.join(', ')})` : '';
   const texts = Object.entries(f.facts.trailingSpaces ?? {});
-  const trimmed = texts.filter(([, x]) => x).map(([k]) => k.replace('|', '.'));
+  // the keys are dax-sql's (opaque): their table and column from trailingSpacesCheck, read once
+  h.textColumns ??= Object.fromEntries((h.compiler?.trailingSpacesCheck().columns ?? []).map(c => [c.key, `${c.table}.${c.column}`]));
+  const trimmed = texts.filter(([, x]) => x).map(([k]) => h.textColumns[k] ?? k);
   const spaces = texts.length
     ? `; ${texts.length} text columns checked, ${trimmed.length ? `trimmed: ${trimmed.join(', ')}` : 'none with trailing spaces'}`
     : '';
@@ -271,19 +303,30 @@ function dataAsOf(h) {
 function tablesFrom(h) {
   if (h.offline) return `search path (OneLake not attached: ${h.offline})`;
   if (!h.lake?.size) return 'search path';
-  return `OneLake ${[...new Set([...h.lake.values()].map(l => `${l.workspace}/${l.item}`))].join(', ')}`;
+  return `OneLake ${[...new Set([...h.lake.values()].map(l => `${l.catalog} (${l.workspace}/${l.item})`))].join(', ')}`;
 }
 
 // ---------------------------------------------------------------------------------------------
 // The statements, read by dax-sql's createViews.
 
-// What SHOW SEMANTIC lists (the grammar's dax_sql_show): kind 'views', 'metrics' or 'dimensions'
-// (of view `name`; with `metric`, only those that filter it), as a SELECT over VALUES.
-function show(kind, name, metric) {
-  const text = kind === 'views'
-    ? 'SHOW SEMANTIC VIEWS'
-    : `SHOW SEMANTIC ${kind === 'metrics' ? 'METRICS' : 'DIMENSIONS'} IN ${ident(name)}${metric ? ` FOR METRIC ${ident(metric)}` : ''}`;
-  return views.rewrite(text)[0].sql;
+// One of the extension's statements (the grammar's text of it: CREATE / DROP / REFRESH / SHOW
+// SEMANTIC ...), read by dax-sql's rewrite, which owns its rules and names the view in full. One
+// line, tab-separated, for the extension's table function:
+//   create <db> <schema> <name> <path> <mode>   ('' for a db or schema not given)
+//   drop <full name> <if exists: true|false>
+//   refresh <full name> <name>
+//   sql <the SELECT that lists SHOW's rows>
+function statement(text) {
+  const out = views.rewrite(text);
+  const e = out?.length === 1 ? out[0] : null;
+  if (e?.create) {
+    const { db, schema, name, path, mode } = e.create;
+    return ['create', db ?? '', schema ?? '', name, path, mode].join('\t');
+  }
+  if (e?.drop) return ['drop', e.drop.name, e.drop.ifExists ? 'true' : 'false'].join('\t');
+  if (e?.refresh) return ['refresh', e.refresh.name, views.get(e.refresh.name).name].join('\t');
+  if (e?.sql != null) return `sql\t${e.sql}`;
+  throw fail(`not a semantic view statement: ${text}`, 'INPUT');
 }
 
 // The SQL a statement that failed to bind stands for (the extension's rebind hook, and its parse
@@ -320,7 +363,7 @@ function rewrite(sql, dry = false) {
       if (!dry) forget(viewName(v), 'false');
       statements.push(`DELETE FROM ${ident(v.db)}.${ident(v.schema)}.dax_sql_semantic_views WHERE lower(view_name) = lower(${str(v.name)})`);
     } else if (entry.refresh) {
-      statements.push(`SELECT * FROM dax_sql_refresh(${str(views.get(entry.refresh.name).name)})`);
+      statements.push(`SELECT * FROM dax_sql_refresh(${str(`REFRESH SEMANTIC VIEW ${entry.refresh.name}`)})`);
     } else {
       statements.push(entry.sql);
     }
@@ -346,11 +389,12 @@ globalThis.dax_sql = {
     return ['refresh', ...(h.offline ? [] : catalogLines(h))].join('\n');
   },
   frame_failed: frameFailed,
+  set_catalog: setCatalog,
   facts,
   set_facts: setFacts,
   data_as_of: name => dataAsOf(host(name)),
   bind_sql: bindSql,
-  show,
+  statement,
   forget,
   // a database detached: its views forgotten (its file keeps them)
   forget_database: db => {

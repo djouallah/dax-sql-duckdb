@@ -26,7 +26,7 @@ UNSIGNED = {"allow_unsigned_extensions": "true"}
 TMP = tempfile.mkdtemp()
 FAILED = []
 # What fails today for a reason filed: reported, not failing the run, and said when it works
-KNOWN = {}
+KNOWN = {"OR REPLACE with IF NOT EXISTS is refused": "djouallah/dax-sql#34"}
 NOW_WORKS = []
 
 
@@ -424,13 +424,44 @@ def _():
     fails("a view that is not, refreshed", lambda: con.sql("REFRESH SEMANTIC VIEW nosuch").fetchall(), "nosuch")
     fails("a view that is not, described", lambda: con.sql("DESCRIBE SEMANTIC VIEW nosuch").fetchall(), "nosuch")
     fails("a view created twice", lambda: con.sql(f"CREATE SEMANTIC VIEW contoso FROM '{MODEL}'").fetchall(), "contoso")
+    check("the connection still answers", con.sql(Q).fetchall() == BASE)
+    check("and lists only contoso", names(con) == ["contoso"], names(con))
+
+
+@scenario("OR REPLACE with IF NOT EXISTS is refused")
+def _():
+    con = connect()
     fails(
         "OR REPLACE with IF NOT EXISTS",
         lambda: con.sql(f"CREATE OR REPLACE SEMANTIC VIEW IF NOT EXISTS contoso FROM '{MODEL}'").fetchall(),
         "IF NOT EXISTS",
     )
-    check("the connection still answers", con.sql(Q).fetchall() == BASE)
-    check("and lists only contoso", names(con) == ["contoso"], names(con))
+
+
+@scenario("a view of the same name in two schemas: each statement acts on the one it names")
+def _():
+    con = connect()
+    con.sql("CREATE SCHEMA other")
+    con.sql(f"CREATE SEMANTIC VIEW other.contoso FROM '{MODEL}'")
+    listed = con.sql("SELECT schema_name, view_name FROM (SHOW SEMANTIC VIEWS) ORDER BY ALL").fetchall()
+    check("both listed", listed == [("main", "contoso"), ("other", "contoso")], listed)
+    metrics = con.sql("SELECT count(*) FROM (SHOW SEMANTIC METRICS IN other.contoso)").fetchall()[0][0]
+    check("SHOW METRICS IN other.contoso", metrics > 0, metrics)
+    refreshed = con.sql("REFRESH SEMANTIC VIEW memory.other.contoso").fetchall()
+    check("REFRESH memory.other.contoso names it", refreshed[0][0] == "contoso", refreshed)
+    check(
+        "the other answers by its full name",
+        con.sql(Q.replace("FROM contoso", "FROM other.contoso")).fetchall() == BASE,
+    )
+    con.sql("DROP SEMANTIC VIEW other.contoso")
+    left = con.sql("SELECT schema_name, view_name FROM (SHOW SEMANTIC VIEWS)").fetchall()
+    check("DROP other.contoso drops that one", left == [("main", "contoso")], left)
+    check("main's still answers", con.sql(Q).fetchall() == BASE)
+    fails(
+        "a name of four parts",
+        lambda: con.sql(f"CREATE SEMANTIC VIEW a.b.c.d FROM '{MODEL}'").fetchall(),
+        "a.b.c.d",
+    )
 
 
 @scenario("LOAD again, and the view replaced by itself while a relation is open")

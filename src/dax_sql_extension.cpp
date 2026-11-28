@@ -52,6 +52,12 @@ struct DaxSqlState {
 	//! The databases whose views are defined: those at LOAD, and each attached since (#8)
 	std::mutex databases_lock;
 	std::set<string> databases;
+	//! The lakehouses' and workspaces' names by GUID (lower case), from OneLake's blob listings
+	std::mutex lakes_lock;
+	unordered_map<string, string> display;
+	//! The catalogs the extension attached (lower case): a catalog of that name is the extension's
+	//! to attach afresh; any other is the session's, read as it is
+	std::set<string> attached;
 	//! The session's first database: a view kept there reads its tables on the search path; one
 	//! kept in another database reads them in it
 	string home;
@@ -147,6 +153,7 @@ static bool SwapBody(SQLStatement &statement, SQLStatement &fresh) {
 }
 
 static void CatchUpDatabases(ClientContext &context, DaxSqlState &state);
+static vector<vector<string>> QueryRows(Connection &con, const string &sql);
 
 //! What a CREATE or DROP SEMANTIC VIEW changed, to put back if its transaction rolls back (#7): the
 //! view's stored definition before it (existed false: there was no view)
@@ -377,36 +384,35 @@ static string JsonString(const string &s) {
 	return out + "\"";
 }
 
-// A model's text, as the glue reads it: a file's own text, or for a folder of TMDL files (a PBIP's
-// definition/, a .SemanticModel folder) one JSON object, { "<file>": "<text>", ... }. A path that
-// does not end in a model file's extension is globbed for **/*.tmdl first; with none found it is
-// read as a file, and the glue says what it takes. A folder with none in it is refused.
+// A model's text, as the glue reads it: a file's own text, or for a folder (a PBIP's definition/,
+// a .SemanticModel folder, a Fabric semantic view's folder of Ossie files) one JSON object of its
+// files' texts, { "<file in it>": "<text>", ... }. The path is read as a file first; one that is no
+// file is a folder, every file in it at any depth given to dax-sql's readModel, which picks what it
+// reads and refuses what is no model (#11; until djouallah/dax-sql#35 says which files it reads).
 static string ReadModel(ClientContext &context, const string &path) {
-	auto lower = StringUtil::Lower(path);
-	for (auto ext : {".bim", ".tmdl", ".yaml", ".yml"}) {
-		if (StringUtil::EndsWith(lower, ext)) {
-			return ReadFile(context, path);
+	string not_a_file;
+	try {
+		auto text = ReadFile(context, path);
+		// a OneLake folder reads as an empty file: no model is empty
+		if (!text.empty()) {
+			return text;
 		}
+		not_a_file = path + " is empty";
+	} catch (std::exception &ex) {
+		not_a_file = ErrorData(ex).RawMessage();
 	}
 	auto &fs = FileSystem::GetFileSystem(context);
 	auto dir = path;
 	while (dir.size() > 1 && (dir.back() == '/' || dir.back() == '\\')) {
 		dir.pop_back();
 	}
-	// A folder: its .tmdl files (TMDL), or else its .yaml files, at any depth (a Fabric semantic
-	// view's folder of Apache Ossie files; .yml is not read there, as Fabric does not read it).
 	vector<string> files;
-	for (auto ext : {".tmdl", ".yaml"}) {
-		try {
-			for (auto &info : fs.Glob(dir + "/**/*" + ext)) {
-				files.push_back(info.path);
-			}
-		} catch (std::exception &) {
-			files.clear();
+	try {
+		for (auto &info : fs.Glob(dir + "/**/*")) {
+			files.push_back(info.path);
 		}
-		if (!files.empty()) {
-			break;
-		}
+	} catch (std::exception &) {
+		files.clear();
 	}
 	if (files.empty()) {
 		bool folder = false;
@@ -414,16 +420,23 @@ static string ReadModel(ClientContext &context, const string &path) {
 			folder = fs.DirectoryExists(dir);
 		} catch (std::exception &) {
 		}
-		if (folder) {
-			throw InvalidInputException("%s is a folder with no .tmdl or .yaml file in it", path);
+		if (!folder) {
+			throw IOException("%s", not_a_file);
 		}
-		return ReadFile(context, path);
 	}
 	std::sort(files.begin(), files.end());
 	string out = "{";
-	for (idx_t i = 0; i < files.size(); i++) {
-		auto key = StringUtil::StartsWith(files[i], dir) ? files[i].substr(dir.size() + 1) : files[i];
-		out += (i ? ",\n" : "") + JsonString(key) + ": " + JsonString(ReadFile(context, files[i]));
+	idx_t read = 0;
+	for (auto &file : files) {
+		string text;
+		try {
+			text = ReadFile(context, file);
+		} catch (std::exception &) {
+			// a folder the glob listed as a file
+			continue;
+		}
+		auto key = StringUtil::StartsWith(file, dir) ? file.substr(dir.size() + 1) : file;
+		out += (read++ ? ",\n" : "") + JsonString(key) + ": " + JsonString(text);
 	}
 	return out + "}";
 }
@@ -591,6 +604,148 @@ static string AzureToken(ClientContext &context, const string &workspace, const 
 	return token;
 }
 
+// A GET of OneLake's blob endpoint with a storage token: the body, empty when it does not answer 200.
+static string BlobGet(ClientContext &context, const string &url, const string &token) {
+	try {
+		ExtensionHelper::TryAutoLoadExtension(context, "httpfs");
+		auto &http = HTTPUtil::Get(*context.db);
+		auto params = http.InitializeParameters(context, url);
+		HTTPHeaders headers;
+		headers.Insert("Authorization", "Bearer " + token);
+		headers.Insert("x-ms-version", "2023-11-03");
+		string body;
+		GetRequestInfo get(
+		    url, headers, *params, [](const HTTPResponse &) { return true; },
+		    [&](const_data_ptr_t data, idx_t length) {
+			    body.append(const_char_ptr_cast(data), length);
+			    return true;
+		    });
+		auto response = http.Request(get);
+		if (!response || int(response->status) != 200) {
+			return "";
+		}
+		return body.empty() ? response->body : body;
+	} catch (std::exception &) {
+		return "";
+	}
+}
+
+// The text of each <tag>...</tag> in `xml`, XML's escapes undone.
+static vector<string> XmlValues(const string &xml, const string &tag) {
+	vector<string> values;
+	auto open = "<" + tag + ">", close = "</" + tag + ">";
+	for (auto at = xml.find(open); at != string::npos; at = xml.find(open, at)) {
+		at += open.size();
+		auto end = xml.find(close, at);
+		if (end == string::npos) {
+			break;
+		}
+		auto value = xml.substr(at, end - at);
+		for (auto &e : vector<std::pair<string, string>> {
+		         {"&lt;", "<"}, {"&gt;", ">"}, {"&quot;", "\""}, {"&apos;", "'"}, {"&amp;", "&"}}) {
+			value = StringUtil::Replace(value, e.first, e.second);
+		}
+		values.push_back(value);
+		at = end;
+	}
+	return values;
+}
+
+// Each listed <block> of a blob listing, every page of it: the block's <name> and its metadata's <id>.
+static vector<std::pair<string, string>> BlobListing(ClientContext &context, const string &url, const string &token,
+                                                     const string &block, const string &id) {
+	vector<std::pair<string, string>> out;
+	string marker;
+	for (int page = 0; page < 100; page++) {
+		auto xml = BlobGet(context, url + (marker.empty() ? "" : "&marker=" + StringUtil::URLEncode(marker)), token);
+		if (xml.empty()) {
+			break;
+		}
+		auto open = "<" + block + ">", close = "</" + block + ">";
+		for (auto at = xml.find(open); at != string::npos; at = xml.find(open, at)) {
+			auto end = xml.find(close, at);
+			if (end == string::npos) {
+				break;
+			}
+			auto part = xml.substr(at, end - at);
+			auto names = XmlValues(part, "Name");
+			auto ids = XmlValues(part, id);
+			if (!names.empty() && !ids.empty()) {
+				out.emplace_back(names[0], ids[0]);
+			}
+			at = end;
+		}
+		auto next = XmlValues(xml, "NextMarker");
+		if (next.empty() || next[0].empty()) {
+			break;
+		}
+		marker = next[0];
+	}
+	return out;
+}
+
+// A lakehouse's name in Fabric, from OneLake's blob listings with the storage token: the workspaces
+// the identity sees (each one's name and GUID), then the workspace's items (each one's name and
+// GUID). Kept for the session; empty when it is not found.
+static string LakehouseName(ClientContext &context, DaxSqlState &state, const string &workspace, const string &item,
+                            const string &token) {
+	auto ws = StringUtil::Lower(workspace), id = StringUtil::Lower(item);
+	{
+		std::lock_guard<std::mutex> guard(state.lakes_lock);
+		auto found = state.display.find(id);
+		if (found != state.display.end()) {
+			return found->second;
+		}
+	}
+	if (token.empty()) {
+		return "";
+	}
+	static constexpr const char *BLOB = "https://onelake.blob.fabric.microsoft.com/";
+	string ws_name;
+	{
+		std::lock_guard<std::mutex> guard(state.lakes_lock);
+		auto found = state.display.find(ws);
+		if (found != state.display.end()) {
+			ws_name = found->second;
+		}
+	}
+	if (ws_name.empty()) {
+		for (auto &w : BlobListing(context, string(BLOB) + "?comp=list&include=metadata", token, "Container",
+		                           "WorkspaceObjectId")) {
+			std::lock_guard<std::mutex> guard(state.lakes_lock);
+			state.display[StringUtil::Lower(w.second)] = w.first;
+			if (StringUtil::Lower(w.second) == ws) {
+				ws_name = w.first;
+			}
+		}
+	}
+	string name;
+	if (!ws_name.empty()) {
+		auto url =
+		    string(BLOB) + StringUtil::URLEncode(ws_name) + "?restype=container&comp=list&delimiter=/&include=metadata";
+		for (auto &i : BlobListing(context, url, token, "BlobPrefix", "ArtifactId")) {
+			// "nem.Lakehouse/": a lakehouse is its name; another kind keeps its kind ("x_warehouse")
+			auto text = i.first;
+			if (StringUtil::EndsWith(text, "/")) {
+				text.pop_back();
+			}
+			auto dot = text.rfind('.');
+			if (dot != string::npos) {
+				auto kind = text.substr(dot + 1);
+				text = text.substr(0, dot) + (kind == "Lakehouse" ? "" : "_" + StringUtil::Lower(kind));
+			}
+			std::lock_guard<std::mutex> guard(state.lakes_lock);
+			state.display[StringUtil::Lower(i.second)] = text;
+			if (StringUtil::Lower(i.second) == id) {
+				name = text;
+			}
+		}
+	}
+	std::lock_guard<std::mutex> guard(state.lakes_lock);
+	state.display[id] = name;
+	return name;
+}
+
 // The lines after the first of the glue's define: "<catalog> <workspace>/<item>", one per lakehouse.
 // The secret is looked up in `lookup`, a context in a transaction (the statement's), or else in a
 // transaction of `con`'s own. Returns the first attach's error, empty when every lakehouse is attached.
@@ -600,7 +755,13 @@ static string AzureToken(ClientContext &context, const string &workspace, const 
 // files are cached by DuckDB's external file cache). It is attached afresh each time a view is
 // framed (CREATE, a database opened, REFRESH): the snapshots read are the catalog's current ones,
 // and the token a new one.
-static string AttachOneLake(Connection &con, optional_ptr<ClientContext> lookup, const vector<string> &outcome) {
+//
+// The catalog is the lakehouse's name in Fabric (`nem`), so its tables are nem.schema.table; the
+// GUID name the glue gives when the name is not found. A catalog of that name already in the
+// session, and not the extension's, is the session's tables: they are read as they are, and
+// nothing is attached. The glue is told which catalog each lakehouse is read from.
+static string AttachOneLake(Connection &con, optional_ptr<ClientContext> lookup, const vector<string> &outcome,
+                            DaxSqlState &state) {
 	for (idx_t i = 1; i < outcome.size(); i++) {
 		auto space = outcome[i].find(' ');
 		auto slash = outcome[i].find('/');
@@ -618,6 +779,22 @@ static string AttachOneLake(Connection &con, optional_ptr<ClientContext> lookup,
 			con.BeginTransaction();
 			token = AzureToken(*con.context, workspace, item, why);
 			con.Commit();
+		}
+		auto named = LakehouseName(*con.context, state, workspace, item, token);
+		if (!named.empty()) {
+			catalog = named;
+		}
+		state.js.Call("set_catalog", {item, catalog});
+		auto taken = !QueryRows(con, "SELECT 1 FROM duckdb_databases() WHERE lower(database_name) = lower(" +
+		                                 KeywordHelper::WriteQuoted(catalog) + ")")
+		                  .empty();
+		{
+			std::lock_guard<std::mutex> guard(state.lakes_lock);
+			if (taken && !state.attached.count(StringUtil::Lower(catalog))) {
+				// the session's own: its tables are the view's
+				continue;
+			}
+			state.attached.insert(StringUtil::Lower(catalog));
 		}
 		con.Query("DETACH DATABASE IF EXISTS " + KeywordHelper::WriteQuoted(catalog, '"'));
 		string sql = "ATTACH " + KeywordHelper::WriteQuoted(location);
@@ -713,15 +890,14 @@ static void FrameView(Connection &con, DaxSqlState &state, const string &name) {
 static unique_ptr<FunctionData> RefreshBind(ClientContext &context, TableFunctionBindInput &input,
                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &state = *input.info->Cast<DaxSqlFunctionInfo>().state;
-	if (input.inputs[0].IsNull()) {
-		throw InvalidInputException("dax_sql_refresh: the view's name is NULL");
-	}
-	auto name = StringValue::Get(input.inputs[0]);
+	auto parsed = Statement(state, input, "dax_sql_refresh", "refresh", 3);
+	// the view by its full name; its rows say its own
+	auto &name = parsed[1];
 	{
 		Connection con(*context.db);
 		// The view's lakehouses attached afresh: their current snapshots, not the cached metadata
 		auto catalogs = StringUtil::Split(state.js.Call("catalogs", {name}), '\n');
-		auto error = AttachOneLake(con, &context, catalogs);
+		auto error = AttachOneLake(con, &context, catalogs, state);
 		if (!error.empty()) {
 			state.js.Call("frame_failed", {name, "pins", error});
 		} else {
@@ -731,7 +907,7 @@ static unique_ptr<FunctionData> RefreshBind(ClientContext &context, TableFunctio
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
 	names = {"view_name", "data_as_of"};
 	auto data = make_uniq<DefineData>();
-	data->rows.push_back({Value(name), Value(state.js.Call("data_as_of", {name}))});
+	data->rows.push_back({Value(parsed[2]), Value(state.js.Call("data_as_of", {name}))});
 	return std::move(data);
 }
 
@@ -755,6 +931,14 @@ static vector<string> StringArgs(TableFunctionBindInput &input, const char *func
 
 // Reads the file, defines the view in the glue (an error if the file does not compile), attaches
 // its OneLake lakehouses and frames it. db and schema '' are the session's.
+// A view's name in full, every part quoted, as the glue finds it among views of the same name.
+static string FullName(const string &db, const string &schema, const string &name) {
+	auto quote = [](const string &part) {
+		return KeywordHelper::WriteQuoted(part, '"');
+	};
+	return quote(db) + "." + quote(schema) + "." + quote(name);
+}
+
 static DefinedView DefineView(ClientContext &context, DaxSqlState &state, const vector<string> &args) {
 	DefinedView v;
 	v.db = args[0];
@@ -778,11 +962,11 @@ static DefinedView DefineView(ClientContext &context, DaxSqlState &state, const 
 	if (outcome.size() > 1) {
 		Connection con(*context.db);
 		// Not attached: the view reads its tables from the search path (a copy of the lakehouse).
-		auto error = AttachOneLake(con, &context, outcome);
+		auto error = AttachOneLake(con, &context, outcome, state);
 		if (!error.empty()) {
-			state.js.Call("localize", {v.name, error});
+			state.js.Call("localize", {FullName(v.db, v.schema, v.name), error});
 		} else {
-			FrameView(con, state, v.name);
+			FrameView(con, state, FullName(v.db, v.schema, v.name));
 		}
 	}
 	v.created = !outcome.empty() && outcome[0] == "created";
@@ -814,7 +998,35 @@ static void StoreView(DatabaseInstance &db, const DefinedView &v) {
 	             ", " + Value(v.text).ToSQLString() + ", current_timestamp::TIMESTAMP)");
 }
 
-static vector<vector<string>> QueryRows(Connection &con, const string &sql);
+// One of the extension's statements, as the grammar wrote it (its one argument), read by the glue
+// (dax-sql's rewrite): its fields, the first its kind, which must be `kind`, with `size` fields.
+static vector<string> Statement(DaxSqlState &state, TableFunctionBindInput &input, const char *function,
+                                const string &kind, idx_t size) {
+	auto args = StringArgs(input, function);
+	if (args.size() != 1) {
+		throw InvalidInputException("%s takes the statement's text", function);
+	}
+	auto line = state.js.Call("statement", {args[0]});
+	vector<string> fields;
+	if (kind == "sql") {
+		// SHOW's SELECT may hold a tab: only the first one splits
+		auto tab = line.find('\t');
+		fields = {line.substr(0, tab), tab == string::npos ? "" : line.substr(tab + 1)};
+	} else {
+		// every field kept, an empty one too (CREATE's db and schema may be '')
+		idx_t start = 0;
+		for (idx_t i = 0; i <= line.size(); i++) {
+			if (i == line.size() || line[i] == '\t') {
+				fields.push_back(line.substr(start, i - start));
+				start = i + 1;
+			}
+		}
+	}
+	if (fields.size() != size || fields[0] != kind) {
+		throw InvalidInputException("%s: %s is not a %s statement", function, args[0], kind);
+	}
+	return fields;
+}
 
 // The view's stored row as it is now (existed false: none); db and schema '' are the session's.
 static ViewUndo StoredView(ClientContext &context, const string &db, const string &schema, const string &name) {
@@ -861,11 +1073,11 @@ static void UndoViewChange(ClientContext &context, DaxSqlState &state, const Vie
 			                                 '\n');
 			state.RefreshNames();
 			if (outcome.size() > 1) {
-				auto error = AttachOneLake(con, nullptr, outcome);
+				auto error = AttachOneLake(con, nullptr, outcome, state);
 				if (!error.empty()) {
-					state.js.Call("localize", {undo.name, error});
+					state.js.Call("localize", {FullName(undo.db, undo.schema, undo.name), error});
 				} else {
-					FrameView(con, state, undo.name);
+					FrameView(con, state, FullName(undo.db, undo.schema, undo.name));
 				}
 			}
 			DefinedView v;
@@ -893,7 +1105,8 @@ static void UndoViewChange(ClientContext &context, DaxSqlState &state, const Vie
 static unique_ptr<FunctionData> CreateBind(ClientContext &context, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &state = *input.info->Cast<DaxSqlFunctionInfo>().state;
-	auto args = StringArgs(input, "dax_sql_create");
+	auto parsed = Statement(state, input, "dax_sql_create", "create", 6);
+	vector<string> args(parsed.begin() + 1, parsed.end());
 	auto before = StoredView(context, args[0], args[1], args[2]);
 	auto v = DefineView(context, state, args);
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
@@ -903,7 +1116,7 @@ static unique_ptr<FunctionData> CreateBind(ClientContext &context, TableFunction
 		// before the row is stored: a store that fails (a read-only database) rolls the view back too
 		RecordChange(context, std::move(before));
 		StoreView(*context.db, v);
-		data->rows.push_back({Value(v.name), Value(state.js.Call("data_as_of", {v.name}))});
+		data->rows.push_back({Value(v.name), Value(state.js.Call("data_as_of", {FullName(v.db, v.schema, v.name)}))});
 	}
 	return std::move(data);
 }
@@ -913,8 +1126,8 @@ static unique_ptr<FunctionData> CreateBind(ClientContext &context, TableFunction
 static unique_ptr<FunctionData> DropBind(ClientContext &context, TableFunctionBindInput &input,
                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &state = *input.info->Cast<DaxSqlFunctionInfo>().state;
-	auto args = StringArgs(input, "dax_sql_drop");
-	auto dropped = state.js.Call("forget", {args[2], args[3]});
+	auto parsed = Statement(state, input, "dax_sql_drop", "drop", 3);
+	auto dropped = state.js.Call("forget", {parsed[1], parsed[2]});
 	state.RefreshNames();
 	return_types = {LogicalType::VARCHAR};
 	names = {"view_name"};
@@ -940,8 +1153,8 @@ static unique_ptr<FunctionData> DropBind(ClientContext &context, TableFunctionBi
 static unique_ptr<FunctionData> ShowBind(ClientContext &context, TableFunctionBindInput &input,
                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &state = *input.info->Cast<DaxSqlFunctionInfo>().state;
-	auto args = StringArgs(input, "dax_sql_show");
-	auto sql = state.js.Call("show", {args[0], args[1], args[2]});
+	auto parsed = Statement(state, input, "dax_sql_show", "sql", 2);
+	auto &sql = parsed[1];
 	Framing guard;
 	Connection con(*context.db);
 	auto result = con.Query(sql);
@@ -1046,11 +1259,11 @@ static void RestoreViews(DatabaseInstance &db, DaxSqlState &state, const string 
 			    state.js.Call("define", {database, schema, view[0], view[1], view[2], "restore", state.Own(database)});
 			// Not attached (no secret yet, no azure extension): the view reads the search path.
 			auto lines = StringUtil::Split(outcome, '\n');
-			auto error = AttachOneLake(con, nullptr, lines);
+			auto error = AttachOneLake(con, nullptr, lines, state);
 			if (!error.empty()) {
-				state.js.Call("localize", {view[0], error});
+				state.js.Call("localize", {FullName(database, schema, view[0]), error});
 			} else if (lines.size() > 1) {
-				FrameView(con, state, view[0]);
+				FrameView(con, state, FullName(database, schema, view[0]));
 			}
 		}
 	}
@@ -1165,19 +1378,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	TableFunction refresh("dax_sql_refresh", {LogicalType::VARCHAR}, DefineFunction, RefreshBind, DefineInit);
 	refresh.function_info = make_shared_ptr<DaxSqlFunctionInfo>(state);
 	loader.RegisterFunction(refresh);
-	TableFunction create(
-	    "dax_sql_create",
-	    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-	    DefineFunction, CreateBind, DefineInit);
+	// CREATE, DROP and SHOW SEMANTIC: the statement's text (dax_sql_grammar.cpp), which the glue reads
+	TableFunction create("dax_sql_create", {LogicalType::VARCHAR}, DefineFunction, CreateBind, DefineInit);
 	create.function_info = make_shared_ptr<DaxSqlFunctionInfo>(state);
 	loader.RegisterFunction(create);
-	TableFunction drop("dax_sql_drop",
-	                   {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN},
-	                   DefineFunction, DropBind, DefineInit);
+	TableFunction drop("dax_sql_drop", {LogicalType::VARCHAR}, DefineFunction, DropBind, DefineInit);
 	drop.function_info = make_shared_ptr<DaxSqlFunctionInfo>(state);
 	loader.RegisterFunction(drop);
-	TableFunction show("dax_sql_show", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                   DefineFunction, ShowBind, DefineInit);
+	TableFunction show("dax_sql_show", {LogicalType::VARCHAR}, DefineFunction, ShowBind, DefineInit);
 	show.function_info = make_shared_ptr<DaxSqlFunctionInfo>(state);
 	loader.RegisterFunction(show);
 	ScalarFunction facts("dax_sql_facts", {LogicalType::VARCHAR}, LogicalType::VARCHAR, FactsFunction(state));

@@ -104,14 +104,32 @@ bool Is(ParseResult &parse_result, const char *rule_name) {
 	return StringUtil::CIEquals(parse_result.Name(), rule_name);
 }
 
-//! A QualifiedName child, as the table functions take it: database, schema ('' when not given), name
-vector<Value> NameValues(PEGTransformer &transformer, ListParseResult &list, idx_t index) {
+string Quote(const string &name) {
+	return KeywordHelper::WriteQuoted(name, '"');
+}
+
+//! A QualifiedName child as SQL text, every part quoted, as many parts as were written: dax-sql's
+//! rewrite reads it and says what a name of too many parts is (#10)
+string NameText(PEGTransformer &transformer, ListParseResult &list, idx_t index) {
 	auto name = transformer.Transform<QualifiedName>(list, index);
+	vector<string> parts;
 	if (name.Path().size() > 3) {
-		throw ParserException("a semantic view is named [database.][schema.]name, not \"%s\"", name.ToString());
+		for (auto &part : name.Path()) {
+			parts.push_back(static_cast<const string &>(part));
+		}
+	} else {
+		for (auto &part :
+		     {name.Catalog().GetIdentifierName(), name.Schema().GetIdentifierName(), name.Name().GetIdentifierName()}) {
+			if (!part.empty()) {
+				parts.push_back(part);
+			}
+		}
 	}
-	return {Value(name.Catalog().GetIdentifierName()), Value(name.Schema().GetIdentifierName()),
-	        Value(name.Name().GetIdentifierName())};
+	string text;
+	for (auto &part : parts) {
+		text += (text.empty() ? "" : ".") + Quote(part);
+	}
+	return text;
 }
 
 //! A call of one of the extension's table functions
@@ -150,52 +168,50 @@ string TransformDaxSqlString(PEGTransformer &transformer, ParseResult &parse_res
 	return result;
 }
 
+// Each statement is lowered to one of the extension's table functions with the statement's text,
+// written again from what was parsed: the glue gives it to dax-sql's rewrite, which owns the
+// statements' rules (OR REPLACE with IF NOT EXISTS, FOR METRIC with DIMENSIONS only, a name of at
+// most three parts) and resolves the view by its full name (#10).
+
 // 'CREATE' DaxSqlOrReplace? 'SEMANTIC' 'VIEW' IfNotExists? QualifiedName 'FROM' DaxSqlString
 unique_ptr<SQLStatement> TransformDaxSqlCreateStmt(PEGTransformer &transformer, ParseResult &parse_result) {
 	auto &list = List(parse_result);
-	auto or_replace = Present(list, 1);
-	auto if_not_exists = Present(list, 4);
-	if (or_replace && if_not_exists) {
-		throw ParserException("CREATE OR REPLACE SEMANTIC VIEW cannot be combined with IF NOT EXISTS");
-	}
-	auto args = NameValues(transformer, list, 5);
-	args.push_back(Value(transformer.Transform<string>(list, 7)));
-	args.push_back(Value(or_replace ? "replace" : if_not_exists ? "if_not_exists" : "create"));
-	return CallOf(Function("dax_sql_create", std::move(args)));
+	string text = "CREATE ";
+	text += Present(list, 1) ? "OR REPLACE " : "";
+	text += "SEMANTIC VIEW ";
+	text += Present(list, 4) ? "IF NOT EXISTS " : "";
+	text +=
+	    NameText(transformer, list, 5) + " FROM " + KeywordHelper::WriteQuoted(transformer.Transform<string>(list, 7));
+	return CallOf(Function("dax_sql_create", {Value(text)}));
 }
 
 // 'DROP' 'SEMANTIC' 'VIEW' IfExists? QualifiedName
 unique_ptr<SQLStatement> TransformDaxSqlDropStmt(PEGTransformer &transformer, ParseResult &parse_result) {
 	auto &list = List(parse_result);
-	auto args = NameValues(transformer, list, 4);
-	args.push_back(Value::BOOLEAN(Present(list, 3)));
-	return CallOf(Function("dax_sql_drop", std::move(args)));
+	auto text = string("DROP SEMANTIC VIEW ") + (Present(list, 3) ? "IF EXISTS " : "") + NameText(transformer, list, 4);
+	return CallOf(Function("dax_sql_drop", {Value(text)}));
 }
 
 // 'REFRESH' 'SEMANTIC' 'VIEW' QualifiedName
 unique_ptr<SQLStatement> TransformDaxSqlRefreshStmt(PEGTransformer &transformer, ParseResult &parse_result) {
-	auto args = NameValues(transformer, List(parse_result), 3);
-	return CallOf(Function("dax_sql_refresh", {args[2]}));
+	auto text = "REFRESH SEMANTIC VIEW " + NameText(transformer, List(parse_result), 3);
+	return CallOf(Function("dax_sql_refresh", {Value(text)}));
 }
 
-// 'SHOW' 'SEMANTIC' (DaxSqlShowViews / DaxSqlShowMembers): dax_sql_show(kind, view, metric)
+// 'SHOW' 'SEMANTIC' (DaxSqlShowViews / DaxSqlShowMembers): dax_sql_show(text)
 unique_ptr<TableRef> ShowCall(PEGTransformer &transformer, ParseResult &parse_result) {
 	auto &target = Choice(List(parse_result).GetChild(2));
 	if (Is(target, "DaxSqlShowViews")) {
-		return Call("dax_sql_show", {Value("views"), Value(""), Value("")});
+		return Call("dax_sql_show", {Value("SHOW SEMANTIC VIEWS")});
 	}
 	// DaxSqlMemberKind 'IN' QualifiedName DaxSqlForMetric?
 	auto &list = List(target);
-	auto kind = StringUtil::Lower(Choice(list.GetChild(0)).Cast<KeywordParseResult>().keyword);
-	auto view = NameValues(transformer, list, 2)[2];
-	string metric;
+	auto kind = StringUtil::Upper(Choice(list.GetChild(0)).Cast<KeywordParseResult>().keyword);
+	auto text = "SHOW SEMANTIC " + kind + " IN " + NameText(transformer, list, 2);
 	if (Present(list, 3)) {
-		if (kind != "dimensions") {
-			throw ParserException("FOR METRIC goes with SHOW SEMANTIC DIMENSIONS");
-		}
-		metric = transformer.Transform<string>(List(Optional(list, 3)), 2);
+		text += " FOR METRIC " + Quote(transformer.Transform<string>(List(Optional(list, 3)), 2));
 	}
-	return Call("dax_sql_show", {Value(kind), view, Value(metric)});
+	return Call("dax_sql_show", {Value(text)});
 }
 
 unique_ptr<SQLStatement> TransformDaxSqlShowStmt(PEGTransformer &transformer, ParseResult &parse_result) {
@@ -207,13 +223,7 @@ unique_ptr<SQLStatement> TransformDaxSqlShowStmt(PEGTransformer &transformer, Pa
 // statement's own, which the extension compiles to the view's rows as it does DESCRIBE v
 // (js/glue.js), with an error of its own when no such view exists.
 unique_ptr<SelectStatement> DescribeOf(PEGTransformer &transformer, ParseResult &parse_result) {
-	string name;
-	for (auto &part : NameValues(transformer, List(parse_result), 3)) {
-		auto text = StringValue::Get(part);
-		if (!text.empty()) {
-			name += (name.empty() ? "" : ".") + KeywordHelper::WriteQuoted(text, '"');
-		}
-	}
+	auto name = NameText(transformer, List(parse_result), 3);
 	Parser parser(ParserOptions::Builtin());
 	parser.ParseQuery("DESCRIBE " + name);
 	if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {

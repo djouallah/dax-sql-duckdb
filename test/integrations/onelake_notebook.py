@@ -29,7 +29,7 @@ FOLDER = f"abfss://{WS}@onelake.dfs.fabric.microsoft.com/{LH}/Context/Semantic V
 ICEBERG = "https://onelake.table.fabric.microsoft.com/iceberg"
 FAILED = []
 # What fails today for a reason filed upstream: reported, not failing the run, and said when it works
-KNOWN = {"parameters, as an app binds them": "djouallah/dax-sql#26"}
+KNOWN = {}
 NOW_WORKS = []
 
 
@@ -95,6 +95,9 @@ def _():
     row = views.fetchall()[0]
     check("the view attached OneLake itself", row[1].startswith("OneLake "), row[1])
     check("the view is pinned to its snapshots", row[2].startswith("snapshots of "), row[2])
+    attached = con.sql("SELECT database_name FROM duckdb_databases() WHERE type = 'iceberg'").fetchall()
+    check("the lakehouse attached under its name in Fabric", attached == [("nem",)], attached)
+    check("its tables are nem.schema.table", one("SELECT count(*) FROM nem.mart.dim_duid") > 0)
     con.sql("DESCRIBE nem").show()
     con.sql("DESCRIBE SEMANTIC VIEW nem").show()
     con.sql(BY_REGION).show()
@@ -181,7 +184,7 @@ def _():
 
 @scenario("the user detaches the extension's catalog; REFRESH attaches it again")
 def _():
-    internal = one("SELECT database_name FROM duckdb_databases() WHERE database_name LIKE 'dax_sql_onelake_%'")
+    internal = one("SELECT database_name FROM duckdb_databases() WHERE type = 'iceberg' AND database_name <> 'lake'")
     con.sql(f'DETACH "{internal}"')
     try:
         one(UNITS)
@@ -199,6 +202,36 @@ def _():
     con.sql("SHOW SEMANTIC METRICS IN nem_folder").show()
     con.sql("DROP SEMANTIC VIEW nem_folder").show()
     check("the other still answers", one(UNITS) == one("SELECT count(*) FROM lake.mart.dim_duid"))
+
+
+@scenario("someone attaches a catalog under the lakehouse's name later: DuckDB refuses it")
+def _():
+    try:
+        con.sql(
+            f"ATTACH '{WS}/{LH}' AS nem (TYPE iceberg, URI '{ICEBERG}', TOKEN '{TOKEN}', ACCESS_DELEGATION_MODE 'none')"
+        )
+        check("a second ATTACH AS nem fails", False, "it attached")
+    except duckdb.Error as error:
+        check("a second ATTACH AS nem fails", "already" in str(error).lower(), str(error).splitlines()[0])
+
+
+@scenario("the session already has nem: the view reads those tables, and attaches nothing")
+def _():
+    other = duckdb.connect(config={"allow_unsigned_extensions": "true"})
+    other.sql(f"LOAD '{EXT}'")
+    other.sql("CREATE OR REPLACE SECRET onelake (TYPE azure, PROVIDER credential_chain, CHAIN 'workload_identity')")
+    other.sql(
+        f"ATTACH '{WS}/{LH}' AS nem (TYPE iceberg, URI '{ICEBERG}', TOKEN '{TOKEN}', ACCESS_DELEGATION_MODE 'none')"
+    )
+    other.sql(f"CREATE SEMANTIC VIEW nem_v FROM '{path}'").show()
+    dbs = other.sql("SELECT database_name FROM duckdb_databases() WHERE type = 'iceberg'").fetchall()
+    check("no catalog of the extension's own", dbs == [("nem",)], dbs)
+    check(
+        "the view answers over the session's nem",
+        other.sql('SELECT AGG("Registered units") FROM nem_v').fetchall()[0][0]
+        == other.sql("SELECT count(*) FROM nem.mart.dim_duid").fetchall()[0][0],
+    )
+    other.close()
 
 
 @scenario("parameters, as an app binds them")

@@ -245,7 +245,7 @@ no_such_model.tmdl
 statement error
 CREATE SEMANTIC VIEW wrong FROM 'test/cli';
 ----
-is a folder with no .tmdl or .yaml file in it
+the folder has no .tmdl or .yaml file
 
 # a folder of Ossie files that define a dataset twice (test/models/fixtures/aac_ossie_twice: the
 # folder above, with its first datasets file once more)
