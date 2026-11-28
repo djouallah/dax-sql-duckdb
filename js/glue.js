@@ -174,53 +174,11 @@ function oneLake(bim) {
   return tables;
 }
 
-// A Fabric semantic view's folder of Apache Ossie files (Context/Semantic Views/<view>/), merged
-// into one document as Fabric merges them on publish: every file has `version` and `name`; the
-// lists (datasets, relationships, metrics, extensions) are concatenated, in any file order; a
-// name is defined once across the files (metrics by case); the top-level description is the same
-// wherever it is given. A shim until dax-sql's Ossie reader takes a folder, as its TMDL reader does.
-const OSSIE_LISTS = ['datasets', 'relationships', 'metrics', 'custom_extensions', 'nonportable_extensions'];
-function mergeOssie(files) {
-  const merged = {};
-  const defined = new Map();
-  for (const [file, text] of Object.entries(files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-    let doc;
-    try {
-      doc = parseYaml(text.replace(/^﻿/, ''));
-    } catch (e) {
-      throw new Error(`${file}: ${e.message}`);
-    }
-    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new Error(`${file} is not an Ossie definition`);
-    for (const key of ['version', 'name']) if (doc[key] == null) throw new Error(`${file} has no ${key}`);
-    if (doc.description != null) {
-      if (merged.description != null && merged.description !== doc.description) {
-        throw new Error(`${file}: its description differs from another file's (one description for the view)`);
-      }
-      merged.description = doc.description;
-    }
-    for (const [key, value] of Object.entries(doc)) {
-      if (OSSIE_LISTS.includes(key)) {
-        if (!Array.isArray(value)) throw new Error(`${file}: ${key} is not a list`);
-        for (const item of value) {
-          if (key !== 'custom_extensions' && key !== 'nonportable_extensions' && item?.name != null) {
-            const id = `${key}:${key === 'metrics' ? lc(item.name) : item.name}`;
-            if (defined.has(id)) throw new Error(`${key.replace(/s$/, '')} ${item.name} is in ${defined.get(id)} and ${file}`);
-            defined.set(id, file);
-          }
-        }
-        merged[key] = [...(merged[key] ?? []), ...value];
-      } else if (key !== 'description' && !(key in merged)) {
-        merged[key] = value;
-      }
-    }
-  }
-  return merged;
-}
-
-// An Apache Ossie document as TMSL, by dax-sql's reader.
-function ossieTmsl(path, doc) {
+// An Apache Ossie document as TMSL, by dax-sql's reader; or a Fabric semantic view's folder of them
+// (Context/Semantic Views/<view>/), { "<path>": doc }, which dax-sql merges as Fabric does on publish.
+function ossieTmsl(path, doc, folder = false) {
   const skipped = [];
-  if (!doc || typeof doc !== 'object' || !Array.isArray(doc.datasets)) throw new Error('it has no datasets');
+  if (!folder && (!doc || typeof doc !== 'object' || !Array.isArray(doc.datasets))) throw new Error('it has no datasets');
   const bim = ossieToTmsl(doc, { onSkip: s => skipped.push(s.why) });
   // A metric dax-sql cannot read is left out, as dax-sql does; a model left with none is refused.
   const measures = (bim.model?.tables ?? []).reduce((n, t) => n + (t.measures?.length ?? 0), 0);
@@ -254,7 +212,17 @@ function toTmsl(path, text) {
   const names = Object.keys(files);
   if (!names.length) throw fail(`${path}: the folder has no .tmdl or .yaml file`, 'INPUT');
   if (names.every(n => /\.yaml$/i.test(n))) {
-    return read('a folder of Apache Ossie files', () => ossieTmsl(path, mergeOssie(files)));
+    return read('a folder of Apache Ossie files', () => {
+      const docs = {};
+      for (const [file, text] of Object.entries(files)) {
+        try {
+          docs[file] = parseYaml(text.replace(/^﻿/, ''));
+        } catch (e) {
+          throw new Error(`${file}: ${e.message}`);
+        }
+      }
+      return ossieTmsl(path, docs, true);
+    });
   }
   return read('a TMDL model', () => tmdlToTmsl(files));
 }
@@ -287,7 +255,6 @@ function build(v) {
   const padded = v.frame?.padded;
   if (padded && Object.values(padded).some(Boolean)) options.trailingSpaces = c => padded[c.key] === true;
   v.compiler = createCompiler(tmslToModel(v.bim), options);
-  v.types = undefined;
 }
 
 // Defines a view from its file's text. mode: 'create' (an error if it exists), 'replace',
@@ -465,21 +432,6 @@ function tablesFrom(v) {
 const DUCK_TYPES = { int: 'BIGINT', double: 'DOUBLE', decimal: 'DOUBLE', string: 'VARCHAR', datetime: 'TIMESTAMP', bool: 'BOOLEAN', variant: 'VARCHAR' };
 const duckType = t => DUCK_TYPES[t] ?? 'VARCHAR';
 
-// A measure's type, as the compiler gives it for the measure alone.
-function measureType(v, m) {
-  if (!v.types) v.types = new Map();
-  if (!v.types.has(m.name)) {
-    let t;
-    try {
-      t = v.compiler.compile(`EVALUATE ROW("v", [${m.name.replace(/]/g, ']]')}])`).columns[0].type;
-    } catch {
-      t = 'variant';
-    }
-    v.types.set(m.name, t);
-  }
-  return v.types.get(m.name);
-}
-
 // Rows as a SELECT over VALUES; with none, the columns typed and no row.
 function rows(columns, list) {
   const names = columns.map(([n]) => ident(n)).join(', ');
@@ -507,7 +459,7 @@ function dimensions(v, tables = v.compiler.describe().tables) {
 
 function metrics(v) {
   return v.compiler.describe().measures.map(m =>
-    [v.db, v.schema, v.name, m.table, m.name, duckType(measureType(v, m)), m.expression, m.formatString, false, null]);
+    [v.db, v.schema, v.name, m.table, m.name, duckType(m.type), m.expression, m.formatString, false, null]);
 }
 
 function describe(v) {
@@ -517,7 +469,7 @@ function describe(v) {
   for (const t of model.tables) {
     for (const c of t.columns) list.push([`${t.name}.${c.name}`, duckType(c.type), c.nullable ? 'YES' : 'NO', c.unique ? 'PRI' : null, null, 'column']);
   }
-  for (const m of model.measures) list.push([m.name, duckType(measureType(v, m)), 'YES', null, null, 'measure']);
+  for (const m of model.measures) list.push([m.name, duckType(m.type), 'YES', null, null, 'measure']);
   return rows(cols, list);
 }
 

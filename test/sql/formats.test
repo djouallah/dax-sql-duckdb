@@ -258,7 +258,7 @@ is in datasets/dimensions.yaml and extra.yaml
 statement error
 CREATE SEMANTIC VIEW wrong FROM 'test/models/fixtures/aac_ossie_descriptions';
 ----
-its description differs from another file's
+description differs from another file's
 
 # a folder of Ossie files, one without its name
 statement error
