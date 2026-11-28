@@ -90,6 +90,9 @@ jobs:
       - name: The Python client, as a notebook uses it (test/integrations/python_client.py)
         if: ${{ !cancelled() }}
         run: python test/integrations/python_client.py "$EXT"
+      - name: The odd things people do from Python (test/integrations/python_odd.py)
+        if: ${{ !cancelled() }}
+        run: python test/integrations/python_odd.py "$EXT"
       - name: DuckDB v2.0.1 CLI
         if: ${{ !cancelled() }}
         run: |
@@ -101,6 +104,9 @@ jobs:
       - name: A semantic view over contoso in the CLI
         if: ${{ !cancelled() }}
         run: ./cli/duckdb -unsigned -bail -c "LOAD '$EXT'" -c ".echo on" -c ".read test/cli/contoso.sql"
+      - name: The odd things people do in the CLI (test/cli/odd.sh)
+        if: ${{ !cancelled() }}
+        run: bash test/cli/odd.sh ./cli/duckdb "$EXT"
       - name: Read OneLake
         if: ${{ !cancelled() }}
         run: |
