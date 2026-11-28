@@ -211,6 +211,14 @@ jobs:
             -c "SELECT CASE WHEN tables_from LIKE 'OneLake %' THEN 'reads OneLake' ELSE error('not attached: ' || tables_from) END AS \"check\" FROM (SHOW SEMANTIC VIEWS) WHERE view_name = 'nem'" \
             -c "SELECT dim_region.Region, AGG(\"Registered units\") AS units, AGG(\"Registered MW\") AS mw FROM nem GROUP BY ALL ORDER BY Region"
           rm "$AZURE_FEDERATED_TOKEN_FILE"
+      - name: The README's notebook in Python over the lakehouse, OIDC sign-in (test/integrations/onelake_notebook.py)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          export AZURE_FEDERATED_TOKEN_FILE="$RUNNER_TEMP/oidc.jwt"
+          .github/scripts/entra_token.sh --oidc > "$AZURE_FEDERATED_TOKEN_FILE"
+          python test/integrations/onelake_notebook.py "$EXT"
+          rm "$AZURE_FEDERATED_TOKEN_FILE"
       - uses: actions/setup-node@v4
         if: ${{ !cancelled() }}
         with:
