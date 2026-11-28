@@ -219,6 +219,10 @@ jobs:
           set -euo pipefail
           export AZURE_FEDERATED_TOKEN_FILE="$RUNNER_TEMP/oidc.jwt"
           .github/scripts/entra_token.sh --oidc > "$AZURE_FEDERATED_TOKEN_FILE"
+          # for the catalog the user attaches on their own, beside the extension's
+          STORAGE_TOKEN=$(.github/scripts/entra_token.sh https://storage.azure.com/.default)
+          echo "::add-mask::$STORAGE_TOKEN"
+          export STORAGE_TOKEN
           python test/integrations/onelake_notebook.py "$EXT"
           rm "$AZURE_FEDERATED_TOKEN_FILE"
       - uses: actions/setup-node@v4
