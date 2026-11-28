@@ -222,13 +222,18 @@ function define(db, schema, name, path, text, mode) {
     const v = { db, schema, name, path, bim, lake: oneLake(bim), offline: null, frame: null, frameError: null };
     build(v);
     views.set(lc(name), v);
-    const catalogs = [...new Map([...v.lake.values()].map(l => [l.catalog, l])).values()];
-    return ['created', ...catalogs.map(l => `${l.catalog} ${l.workspace}/${l.item}`)].join('\n');
+    return ['created', ...catalogLines(v)].join('\n');
   } catch (e) {
     if (mode !== 'restore') throw e;
     views.set(lc(name), { db, schema, name, path, error: e.message });
     return 'created';
   }
+}
+
+// The view's lakehouses, one line each, "<catalog> <workspace>/<item>": what the extension attaches.
+function catalogLines(v) {
+  const catalogs = [...new Map([...(v.lake?.values() ?? [])].map(l => [l.catalog, l])).values()];
+  return catalogs.map(l => `${l.catalog} ${l.workspace}/${l.item}`);
 }
 
 // A Direct Lake view whose lakehouse the extension could not attach (no azure extension, as in
@@ -649,6 +654,11 @@ globalThis.dax_sql = {
   frame_sql: frameSql,
   frame,
   facts_found: factsFound,
+  // the lines define gives after its first, for REFRESH's attach
+  catalogs: name => {
+    const v = view(name);
+    return ['refresh', ...(v.offline ? [] : catalogLines(v))].join('\n');
+  },
   frame_failed: frameFailed,
   facts,
   set_facts: setFacts,

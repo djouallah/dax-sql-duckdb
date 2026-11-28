@@ -228,8 +228,18 @@ itself, under an internal name:
 ATTACH '<workspace>/<item>' AS <internal> (
     TYPE iceberg,
     URI 'https://onelake.table.fabric.microsoft.com/iceberg',
-    ACCESS_DELEGATION_MODE 'none');
+    ACCESS_DELEGATION_MODE 'none',
+    READ_ONLY,
+    MAX_TABLE_STALENESS '10 minutes');
 ```
+
+- **Read-only:** the extension never writes to a lakehouse.
+- **Cached metadata:** a table's metadata is kept for 10 minutes between queries
+  (`MAX_TABLE_STALENESS`) instead of asked of the catalog on each one; the data files are cached
+  by DuckDB's external file cache, which is on by default. A framed view reads its pinned
+  snapshots, which no newer metadata changes. Each framing (`CREATE`, a database opened,
+  `REFRESH`) detaches the lakehouse and attaches it again, so the snapshots it pins are the
+  catalog's current ones.
 
 The compiled SQL then names `<internal>.<schemaName>.<entityName>`, and DuckDB's `iceberg` and
 `azure` extensions do the reading. Both autoload, so the user does not `LOAD` them.
@@ -253,7 +263,8 @@ The compiled SQL then names `<internal>.<schemaName>.<entityName>`, and DuckDB's
 
   When none gives a token, the attach's error in `tables_from` says why (`no token: …`).
 
-  The token is used once, at attach time; nothing refreshes it yet (duckdb-iceberg#1429 would).
+  The token is used at attach time, so it is a new one each time the view is framed (`REFRESH`
+  included); between framings nothing refreshes it (duckdb-iceberg#1429 would).
 - **Reading the location:** dax-sql's `directLakeTables(bim)` (`formats/tmsl.js`,
   djouallah/dax-sql#13) says where each Direct Lake table is: the workspace's and the
   lakehouse's GUIDs from the expression it reads, and its schema and entity. A table named by its

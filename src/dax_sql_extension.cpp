@@ -364,6 +364,9 @@ static string ReadModel(ClientContext &context, const string &path) {
 // is the one of a secret DuckDB finds for the lakehouse, when that secret holds one.
 //===--------------------------------------------------------------------===//
 static constexpr const char *ONELAKE_CATALOG = "https://onelake.table.fabric.microsoft.com/iceberg";
+//! How long a lakehouse's table metadata is kept between queries (MAX_TABLE_STALENESS). A framed
+//! view reads its pinned snapshots, which no newer metadata changes; framing attaches afresh.
+static constexpr const char *ONELAKE_STALENESS = "10 minutes";
 
 // The value of `key` in the secret of `type` DuckDB finds for `path`; empty when there is none (or
 // no such secret type, as azure in the browser).
@@ -521,6 +524,12 @@ static string AzureToken(ClientContext &context, const string &workspace, const 
 // The lines after the first of the glue's define: "<catalog> <workspace>/<item>", one per lakehouse.
 // The secret is looked up in `lookup`, a context in a transaction (the statement's), or else in a
 // transaction of `con`'s own. Returns the first attach's error, empty when every lakehouse is attached.
+//
+// Each lakehouse is attached read-only (the extension never writes to it), its tables' metadata
+// kept for ONELAKE_STALENESS between queries instead of asked of the catalog each time (the data
+// files are cached by DuckDB's external file cache). It is attached afresh each time a view is
+// framed (CREATE, a database opened, REFRESH): the snapshots read are the catalog's current ones,
+// and the token a new one.
 static string AttachOneLake(Connection &con, optional_ptr<ClientContext> lookup, const vector<string> &outcome) {
 	for (idx_t i = 1; i < outcome.size(); i++) {
 		auto space = outcome[i].find(' ');
@@ -540,9 +549,11 @@ static string AttachOneLake(Connection &con, optional_ptr<ClientContext> lookup,
 			token = AzureToken(*con.context, workspace, item, why);
 			con.Commit();
 		}
-		string sql = "ATTACH IF NOT EXISTS " + KeywordHelper::WriteQuoted(location);
+		con.Query("DETACH DATABASE IF EXISTS " + KeywordHelper::WriteQuoted(catalog, '"'));
+		string sql = "ATTACH " + KeywordHelper::WriteQuoted(location);
 		sql += " AS " + KeywordHelper::WriteQuoted(catalog, '"');
 		sql += " (TYPE iceberg, URI " + KeywordHelper::WriteQuoted(ONELAKE_CATALOG) + ", ACCESS_DELEGATION_MODE 'none'";
+		sql += ", READ_ONLY, MAX_TABLE_STALENESS " + KeywordHelper::WriteQuoted(ONELAKE_STALENESS);
 		if (!token.empty()) {
 			sql += ", TOKEN " + KeywordHelper::WriteQuoted(token);
 		}
@@ -638,7 +649,15 @@ static unique_ptr<FunctionData> RefreshBind(ClientContext &context, TableFunctio
 	auto name = StringValue::Get(input.inputs[0]);
 	{
 		Connection con(*context.db);
-		FrameView(con, state, name);
+		// The view's lakehouses attached afresh: their current snapshots, not the cached metadata
+		auto catalogs = StringUtil::Split(state.js.Call("catalogs", {name}), '
+');
+		auto error = AttachOneLake(con, &context, catalogs);
+		if (!error.empty()) {
+			state.js.Call("frame_failed", {name, "pins", error});
+		} else {
+			FrameView(con, state, name);
+		}
 	}
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
 	names = {"view_name", "data_as_of"};
