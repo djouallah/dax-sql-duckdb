@@ -220,7 +220,8 @@ def _():
     df = con.sql(BY_REGION).df()
     print(df.head())
     check("a DataFrame", len(df) > 0 and list(df.columns) == ["Region", "units", "mw"])
-    check("an Arrow table", con.sql(BY_REGION).arrow().num_rows == len(df))
+    # .arrow() is a RecordBatchReader in duckdb 2.0's Python client, read whole into a table
+    check("Arrow", con.sql(BY_REGION).arrow().read_all().num_rows == len(df))
     top = con.sql(BY_REGION).filter("units > 0").order("mw DESC").limit(2)
     top.show()
     check("filter, order, limit on the relation", len(top.fetchall()) == min(2, len(df)))
