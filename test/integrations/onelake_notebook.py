@@ -28,6 +28,9 @@ TOKEN = os.environ["STORAGE_TOKEN"]
 FOLDER = f"abfss://{WS}@onelake.dfs.fabric.microsoft.com/{LH}/Context/Semantic Views/nem"
 ICEBERG = "https://onelake.table.fabric.microsoft.com/iceberg"
 FAILED = []
+# What fails today for a reason filed upstream: reported, not failing the run, and said when it works
+KNOWN = {"parameters, as an app binds them": "djouallah/dax-sql#26"}
+NOW_WORKS = []
 
 
 def check(name, ok, detail=""):
@@ -43,11 +46,18 @@ def scenario(title):
 
     def run(f):
         print(f"\n=== {title}")
+        failed = len(FAILED)
         try:
             f()
         except Exception as error:  # noqa: BLE001
             traceback.print_exc()
             check(title, False, f"{type(error).__name__}: {str(error).splitlines()[0]}")
+        if title in KNOWN:
+            if len(FAILED) > failed:
+                del FAILED[failed:]
+                print(f"known: fails until {KNOWN[title]}")
+            else:
+                NOW_WORKS.append(f"{title} ({KNOWN[title]})")
         return f
 
     return run
@@ -232,6 +242,8 @@ def _():
 
 
 print()
+for title in NOW_WORKS:
+    print(f"now works, take it off KNOWN: {title}")
 if FAILED:
     sys.exit("FAILED: " + "; ".join(FAILED))
 print("all ok")
