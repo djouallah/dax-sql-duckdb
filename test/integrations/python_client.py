@@ -109,5 +109,7 @@ for label, run in [
 ]:
     fresh = duckdb.connect(config={"allow_unsigned_extensions": "true"})
     run(fresh, f"LOAD '{EXT}'; CREATE SEMANTIC VIEW one FROM '{MODEL}';")
-    check(f"LOAD and CREATE in one string ({label})", [r[2] for r in fresh.sql("SHOW SEMANTIC VIEWS").fetchall()], ["one"])
+    check(
+        f"LOAD and CREATE in one string ({label})", [r[2] for r in fresh.sql("SHOW SEMANTIC VIEWS").fetchall()], ["one"]
+    )
 print("all ok")
