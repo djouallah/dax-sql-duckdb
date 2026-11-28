@@ -8,7 +8,7 @@ In a Fabric Python notebook ([test/integrations/ossie.ipynb](test/integrations/o
 first upgrade DuckDB, since the extension needs DuckDB 2.0.1:
 
 ```python
-%pip install duckdb --upgrade
+!pip install duckdb --upgrade
 notebookutils.session.restartPython()
 ```
 
@@ -20,6 +20,10 @@ import duckdb
 con = duckdb.connect()
 con.execute("INSTALL dax_sql FROM community")
 con.execute("LOAD dax_sql")
+
+# Not needed in a Fabric Python notebook, which signs in to OneLake by itself. Needed elsewhere;
+# not yet tested in a Fabric Spark notebook.
+con.execute("CREATE OR REPLACE SECRET onelake (TYPE azure, PROVIDER credential_chain)")
 
 con.execute("""
 CREATE OR REPLACE SEMANTIC VIEW nem
@@ -44,8 +48,7 @@ semantic views yet.
   wherever DuckDB reads: a local path, S3, Azure or OneLake.
 - **The data:** the YAML's DirectLake expression names its lakehouse, so the view attaches it
   through OneLake's Iceberg REST catalog and reads its tables there, pinned to their current
-  snapshots. A Fabric notebook needs no secret; elsewhere, create one first:
-  `CREATE SECRET onelake (TYPE azure, PROVIDER credential_chain)`. A YAML that names no
+  snapshots, with the token of the Azure secret (a Fabric Python notebook needs none). A YAML that names no
   lakehouse reads `schema.table` from the search path: `ATTACH` the catalog and `USE` it before
   the `CREATE`.
 - **Queries:** plain DuckDB SQL. A measure is `AGG(name)`, or `AGG("name with spaces")`. Model
