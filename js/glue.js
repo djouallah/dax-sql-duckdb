@@ -55,8 +55,13 @@ function oneLake(bim) {
 // over the lakehouse reads it there.
 const lakeCatalogs = new Map();
 
-function setCatalog(item, catalog) {
+// Why a lakehouse is read under its GUID name: its name in Fabric was not found (tables_from says).
+const unnamed = new Map();
+
+function setCatalog(item, catalog, why = '') {
   lakeCatalogs.set(lc(item), catalog);
+  if (why) unnamed.set(lc(item), why);
+  else unnamed.delete(lc(item));
   for (const h of hosts.values()) {
     if (!h.lake?.size) continue;
     let changed = false;
@@ -303,7 +308,11 @@ function dataAsOf(h) {
 function tablesFrom(h) {
   if (h.offline) return `search path (OneLake not attached: ${h.offline})`;
   if (!h.lake?.size) return 'search path';
-  return `OneLake ${[...new Set([...h.lake.values()].map(l => `${l.catalog} (${l.workspace}/${l.item})`))].join(', ')}`;
+  const where = l => {
+    const why = unnamed.get(lc(l.item));
+    return `${l.catalog} (${l.workspace}/${l.item}${why ? `; no name in Fabric: ${why}` : ''})`;
+  };
+  return `OneLake ${[...new Set([...h.lake.values()].map(where))].join(', ')}`;
 }
 
 // ---------------------------------------------------------------------------------------------

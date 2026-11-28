@@ -611,6 +611,9 @@ static string AzureToken(ClientContext &context, const string &workspace, const 
 }
 
 // A GET of OneLake's blob endpoint with a storage token: the body, empty when it does not answer 200.
+//! Why the last BlobGet on this thread answered nothing
+static thread_local string blob_error;
+
 static string BlobGet(ClientContext &context, const string &url, const string &token) {
 	try {
 		ExtensionHelper::TryAutoLoadExtension(context, "httpfs");
@@ -628,10 +631,13 @@ static string BlobGet(ClientContext &context, const string &url, const string &t
 		    });
 		auto response = http.Request(get);
 		if (!response || int(response->status) != 200) {
+			blob_error =
+			    "OneLake's blob listing answered " + (response ? to_string(int(response->status)) : string("nothing"));
 			return "";
 		}
 		return body.empty() ? response->body : body;
-	} catch (std::exception &) {
+	} catch (std::exception &ex) {
+		blob_error = "OneLake's blob listing: " + ErrorData(ex).RawMessage();
 		return "";
 	}
 }
@@ -694,7 +700,8 @@ static vector<std::pair<string, string>> BlobListing(ClientContext &context, con
 // the identity sees (each one's name and GUID), then the workspace's items (each one's name and
 // GUID). Kept for the session; empty when it is not found.
 static string LakehouseName(ClientContext &context, DaxSqlState &state, const string &workspace, const string &item,
-                            const string &token) {
+                            const string &token, string &why) {
+	blob_error.clear();
 	auto ws = StringUtil::Lower(workspace), id = StringUtil::Lower(item);
 	{
 		std::lock_guard<std::mutex> guard(state.lakes_lock);
@@ -704,6 +711,7 @@ static string LakehouseName(ClientContext &context, DaxSqlState &state, const st
 		}
 	}
 	if (token.empty()) {
+		why = "no storage token";
 		return "";
 	}
 	static constexpr const char *BLOB = "https://onelake.blob.fabric.microsoft.com/";
@@ -747,6 +755,12 @@ static string LakehouseName(ClientContext &context, DaxSqlState &state, const st
 			}
 		}
 	}
+	if (name.empty()) {
+		why = !blob_error.empty() ? blob_error
+		      : ws_name.empty()   ? "workspace " + workspace + " is not among those its identity lists"
+		                          : "item " + item + " is not in workspace " + ws_name;
+		return "";
+	}
 	std::lock_guard<std::mutex> guard(state.lakes_lock);
 	state.display[id] = name;
 	return name;
@@ -778,19 +792,22 @@ static string AttachOneLake(Connection &con, optional_ptr<ClientContext> lookup,
 		auto location = outcome[i].substr(space + 1);
 		auto workspace = outcome[i].substr(space + 1, slash - space - 1);
 		auto item = outcome[i].substr(slash + 1);
-		string token, why;
+		// the token and the lakehouse's name, in a context with a transaction: the statement's, or one
+		// of `con`'s own (HTTP's settings and the secrets are read in one)
+		string token, why, named, unnamed;
 		if (lookup) {
 			token = AzureToken(*lookup, workspace, item, why);
+			named = LakehouseName(*lookup, state, workspace, item, token, unnamed);
 		} else {
 			con.BeginTransaction();
 			token = AzureToken(*con.context, workspace, item, why);
+			named = LakehouseName(*con.context, state, workspace, item, token, unnamed);
 			con.Commit();
 		}
-		auto named = LakehouseName(*con.context, state, workspace, item, token);
 		if (!named.empty()) {
 			catalog = named;
 		}
-		state.js.Call("set_catalog", {item, catalog});
+		state.js.Call("set_catalog", {item, catalog, unnamed});
 		auto taken = !QueryRows(con, "SELECT 1 FROM duckdb_databases() WHERE lower(database_name) = lower(" +
 		                                 KeywordHelper::WriteQuoted(catalog) + ")")
 		                  .empty();
