@@ -353,6 +353,7 @@ def _():
         "read",
     )
     check("read-only: still answers after the failed CREATE", ro.sql(Q).fetchall() == BASE)
+    check("read-only: the failed CREATE left no view", names(ro) == ["contoso"], names(ro))
     ro.close()
     mem = connect(view=False, data=False)
     mem.sql(f"ATTACH '{path}' AS shop (READ_ONLY)")
@@ -361,6 +362,13 @@ def _():
         "attached: its view answers by its full name",
         mem.sql(Q.replace("FROM contoso", "FROM shop.main.contoso")).fetchall() == BASE,
     )
+    mem.sql("DETACH shop")
+    fails(
+        "detached: its view is gone",
+        lambda: mem.sql(Q.replace("FROM contoso", "FROM shop.main.contoso")).fetchall(),
+        "contoso",
+    )
+    check("detached: no view listed", names(mem) == [], names(mem))
     mem.close()
 
 

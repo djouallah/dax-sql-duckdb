@@ -345,4 +345,9 @@ globalThis.dax_sql = {
   bind_sql: bindSql,
   show,
   forget,
+  // a database detached: its views forgotten (its file keeps them)
+  forget_database: db => {
+    for (const v of views.list().filter(v => lc(v.db) === lc(db))) forget(viewName(v), 'true');
+    return '';
+  },
 };

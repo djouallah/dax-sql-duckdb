@@ -13,6 +13,7 @@
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
+#include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/http/http_util.hpp"
@@ -38,6 +39,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <set>
 
 namespace duckdb {
 
@@ -47,6 +49,9 @@ struct DaxSqlState {
 	JsEngine js;
 	std::mutex names_lock;
 	vector<string> names;
+	//! The databases whose views are defined: those at LOAD, and each attached since (#8)
+	std::mutex databases_lock;
+	std::set<string> databases;
 
 	void RefreshNames() {
 		auto text = js.Call("names", {});
@@ -134,6 +139,18 @@ static bool SwapBody(SQLStatement &statement, SQLStatement &fresh) {
 	return true;
 }
 
+static void CatchUpDatabases(ClientContext &context, DaxSqlState &state);
+
+//! What a CREATE or DROP SEMANTIC VIEW changed, to put back if its transaction rolls back (#7): the
+//! view's stored definition before it (existed false: there was no view)
+struct ViewUndo {
+	string db, schema, name;
+	bool existed = false;
+	string path, text;
+};
+
+static void UndoViewChange(ClientContext &context, DaxSqlState &state, const ViewUndo &undo);
+
 class DaxSqlRebindState : public ClientContextState {
 public:
 	static constexpr const char *KEY = "dax_sql_rebind";
@@ -143,6 +160,32 @@ public:
 
 	bool CanRequestRebind() override {
 		return true;
+	}
+
+	void QueryBegin(ClientContext &context) override {
+		if (!framing) {
+			CatchUpDatabases(context, *state);
+		}
+	}
+
+	void Record(ViewUndo undo) {
+		changes.push_back(std::move(undo));
+	}
+
+	using ClientContextState::TransactionRollback;
+
+	void TransactionCommit(MetaTransaction &transaction, ClientContext &context) override {
+		changes.clear();
+	}
+
+	// The glue and the stored rows are not transactional: what the transaction changed is put back,
+	// the last change first.
+	void TransactionRollback(MetaTransaction &transaction, ClientContext &context) override {
+		auto undo = std::move(changes);
+		changes.clear();
+		for (auto it = undo.rbegin(); it != undo.rend(); ++it) {
+			UndoViewChange(context, *state, *it);
+		}
 	}
 
 	RebindQueryInfo OnPlanningError(ClientContext &context, SQLStatement &statement, ErrorData &error) override {
@@ -168,6 +211,7 @@ public:
 
 private:
 	shared_ptr<DaxSqlState> state;
+	vector<ViewUndo> changes;
 };
 
 //===--------------------------------------------------------------------===//
@@ -192,9 +236,18 @@ struct DaxSqlParserInfo : public ParserExtensionInfo {
 static ParserOverrideResult DaxSqlParserOverride(ParserExtensionInfo *info, const string &query,
                                                  ParserOptions &options) {
 	auto &state = *info->Cast<DaxSqlParserInfo>().state;
-	if (framing || !options.context || !state.MightBeOurs(query)) {
+	if (framing || !options.context) {
 		return ParserOverrideResult();
 	}
+	// a database attached since the last statement: its views, before the text is read
+	CatchUpDatabases(*options.context, state);
+	if (!state.MightBeOurs(query)) {
+		return ParserOverrideResult();
+	}
+	// A model query dax-sql read and refused (SEMANTIC, UNSUPPORTED): its error is the statement's,
+	// thrown after the usual parse's errors had their turn (#6). A text it does not read (SYNTAX) is
+	// DuckDB's.
+	ErrorData refused;
 	try {
 		// the usual parse of the whole text, with this override off
 		auto usual = options;
@@ -212,7 +265,14 @@ static ParserOverrideResult DaxSqlParserOverride(ParserExtensionInfo *info, cons
 			string sql;
 			try {
 				sql = state.js.Call("bind_sql", {statement->query});
-			} catch (std::exception &) {
+			} catch (std::exception &ex) {
+				ErrorData error(ex);
+				// in a text of one statement: in a script, a statement before it may replace the view
+				if (parser.statements.size() == 1 &&
+				    (error.Type() == ExceptionType::BINDER || error.Type() == ExceptionType::NOT_IMPLEMENTED)) {
+					refused = std::move(error);
+					break;
+				}
 				continue;
 			}
 			if (sql.empty()) {
@@ -227,14 +287,17 @@ static ParserOverrideResult DaxSqlParserOverride(ParserExtensionInfo *info, cons
 			// which compiles it again here).
 			compiled = true;
 		}
-		if (!compiled) {
-			return ParserOverrideResult();
+		if (!refused.HasError()) {
+			if (!compiled) {
+				return ParserOverrideResult();
+			}
+			return ParserOverrideResult(std::move(parser.statements));
 		}
-		return ParserOverrideResult(std::move(parser.statements));
 	} catch (std::exception &) {
 		// a syntax error is the usual parse's to report
 		return ParserOverrideResult();
 	}
+	refused.Throw();
 }
 
 class DaxSqlConnectionCallback : public ExtensionCallback {
@@ -743,17 +806,93 @@ static void StoreView(DatabaseInstance &db, const DefinedView &v) {
 	             ", " + Value(v.text).ToSQLString() + ", current_timestamp::TIMESTAMP)");
 }
 
+static vector<vector<string>> QueryRows(Connection &con, const string &sql);
+
+// The view's stored row as it is now (existed false: none); db and schema '' are the session's.
+static ViewUndo StoredView(ClientContext &context, const string &db, const string &schema, const string &name) {
+	ViewUndo undo;
+	undo.db = db.empty() ? DatabaseManager::GetDefaultDatabase(context).GetIdentifierName() : db;
+	undo.schema = schema;
+	if (undo.schema.empty()) {
+		undo.schema = ClientData::Get(context).catalog_search_path->GetDefault().GetSchema().GetIdentifierName();
+	}
+	if (undo.schema.empty()) {
+		undo.schema = DEFAULT_SCHEMA;
+	}
+	undo.name = name;
+	Framing guard;
+	Connection con(*context.db);
+	auto rows = QueryRows(con, "SELECT view_name, path, definition FROM " + Quoted(undo.db) + "." +
+	                               Quoted(undo.schema) + ".dax_sql_semantic_views WHERE lower(view_name) = lower(" +
+	                               KeywordHelper::WriteQuoted(name) + ")");
+	if (!rows.empty() && rows[0].size() == 3) {
+		undo.existed = true;
+		undo.name = rows[0][0];
+		undo.path = rows[0][1];
+		undo.text = rows[0][2];
+	}
+	return undo;
+}
+
+static void RecordChange(ClientContext &context, ViewUndo undo) {
+	auto rebind = context.registered_state->Get<DaxSqlRebindState>(DaxSqlRebindState::KEY);
+	if (rebind) {
+		rebind->Record(std::move(undo));
+	}
+}
+
+// The view put back as it was before a change its transaction rolled back: defined again from its
+// stored text and stored again, or forgotten and its row deleted. A failure leaves it as it is.
+static void UndoViewChange(ClientContext &context, DaxSqlState &state, const ViewUndo &undo) {
+	try {
+		Framing guard;
+		Connection con(*context.db);
+		if (undo.existed) {
+			auto outcome = StringUtil::Split(
+			    state.js.Call("define", {undo.db, undo.schema, undo.name, undo.path, undo.text, "replace"}), '\n');
+			state.RefreshNames();
+			if (outcome.size() > 1) {
+				auto error = AttachOneLake(con, nullptr, outcome);
+				if (!error.empty()) {
+					state.js.Call("localize", {undo.name, error});
+				} else {
+					FrameView(con, state, undo.name);
+				}
+			}
+			DefinedView v;
+			v.db = undo.db;
+			v.schema = undo.schema;
+			v.name = undo.name;
+			v.path = undo.path;
+			v.text = undo.text;
+			StoreView(*context.db, v);
+		} else {
+			state.js.Call("forget", {Quoted(undo.db) + "." + Quoted(undo.schema) + "." + Quoted(undo.name), "true"});
+			state.RefreshNames();
+			con.Query("DELETE FROM " + Quoted(undo.db) + "." + Quoted(undo.schema) +
+			          ".dax_sql_semantic_views WHERE lower(view_name) = lower(" +
+			          KeywordHelper::WriteQuoted(undo.name) + ")");
+		}
+	} catch (std::exception &) {
+		// a rollback does not fail: the view stays as the statement left it
+	}
+}
+
 // dax_sql_create(db, schema, name, path, mode): what CREATE SEMANTIC VIEW is (dax_sql_grammar.cpp).
 // mode: 'create', 'replace' or 'if_not_exists'. One row, the view and its frame; none when IF NOT
 // EXISTS finds it.
 static unique_ptr<FunctionData> CreateBind(ClientContext &context, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &state = *input.info->Cast<DaxSqlFunctionInfo>().state;
-	auto v = DefineView(context, state, StringArgs(input, "dax_sql_create"));
+	auto args = StringArgs(input, "dax_sql_create");
+	auto before = StoredView(context, args[0], args[1], args[2]);
+	auto v = DefineView(context, state, args);
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
 	names = {"view_name", "data_as_of"};
 	auto data = make_uniq<DefineData>();
 	if (v.created) {
+		// before the row is stored: a store that fails (a read-only database) rolls the view back too
+		RecordChange(context, std::move(before));
 		StoreView(*context.db, v);
 		data->rows.push_back({Value(v.name), Value(state.js.Call("data_as_of", {v.name}))});
 	}
@@ -774,6 +913,7 @@ static unique_ptr<FunctionData> DropBind(ClientContext &context, TableFunctionBi
 	if (!dropped.empty()) {
 		auto parts = StringUtil::Split(dropped, '\t');
 		if (parts.size() == 3) {
+			RecordChange(context, StoredView(context, parts[0], parts[1], parts[2]));
 			Framing guard;
 			Connection con(*context.db);
 			// a view kept nowhere (its database read-only, say) has no row to delete
@@ -878,9 +1018,16 @@ static vector<vector<string>> QueryRows(Connection &con, const string &sql) {
 static constexpr const char *STORED_TABLES =
     "SELECT database_name, schema_name FROM duckdb_tables() WHERE table_name = 'dax_sql_semantic_views'";
 
-static void RestoreViews(DatabaseInstance &db, DaxSqlState &state) {
+// The views stored in a database file (or in every database, with none named), defined again.
+static void RestoreViews(DatabaseInstance &db, DaxSqlState &state, const string &database = "") {
+	Framing guard;
 	Connection con(db);
-	for (auto &table : QueryRows(con, STORED_TABLES)) {
+	auto stored = string(STORED_TABLES);
+	if (!database.empty()) {
+		// pushed down: only that database's catalog is read
+		stored += " AND database_name = " + KeywordHelper::WriteQuoted(database);
+	}
+	for (auto &table : QueryRows(con, stored)) {
 		auto &database = table[0];
 		auto &schema = table[1];
 		auto from = KeywordHelper::WriteQuoted(database, '"') + "." + KeywordHelper::WriteQuoted(schema, '"');
@@ -895,6 +1042,58 @@ static void RestoreViews(DatabaseInstance &db, DaxSqlState &state) {
 			} else if (lines.size() > 1) {
 				FrameView(con, state, view[0]);
 			}
+		}
+	}
+	state.RefreshNames();
+}
+
+// The databases a view can be stored in: DuckDB's own, not the system's, the temporary one or the
+// extension's OneLake catalogs.
+static std::set<string> StoringDatabases(DatabaseManager &manager) {
+	std::set<string> names;
+	for (auto &attached : manager.GetDatabases()) {
+		if (attached->IsSystem() || attached->IsTemporary()) {
+			continue;
+		}
+		auto name = attached->GetName().GetIdentifierName();
+		if (StringUtil::StartsWith(name, "dax_sql_onelake_") || attached->GetCatalog().GetCatalogType() != "duckdb") {
+			continue;
+		}
+		names.insert(name);
+	}
+	return names;
+}
+
+// A database file attached since LOAD has its stored views defined; one detached, its views
+// forgotten (#8). Called as a text is parsed and as a query begins: cheap when nothing changed.
+static void CatchUpDatabases(ClientContext &context, DaxSqlState &state) {
+	auto now = StoringDatabases(DatabaseManager::Get(context));
+	vector<string> attached, detached;
+	{
+		std::lock_guard<std::mutex> guard(state.databases_lock);
+		if (now == state.databases) {
+			return;
+		}
+		for (auto &name : now) {
+			if (!state.databases.count(name)) {
+				attached.push_back(name);
+			}
+		}
+		for (auto &name : state.databases) {
+			if (!now.count(name)) {
+				detached.push_back(name);
+			}
+		}
+		state.databases = now;
+	}
+	for (auto &name : detached) {
+		state.js.Call("forget_database", {name});
+	}
+	for (auto &name : attached) {
+		try {
+			RestoreViews(*context.db, state, name);
+		} catch (std::exception &) {
+			// a file whose stored views cannot be read is still the user's to query
 		}
 	}
 	state.RefreshNames();
@@ -979,6 +1178,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	set_facts.SetVolatile();
 	loader.RegisterFunction(set_facts);
 
+	state->databases = StoringDatabases(DatabaseManager::Get(db));
 	RestoreViews(db, *state);
 
 	// The statements: grammar rules (dax_sql_grammar.cpp). The model queries: compiled when they fail
