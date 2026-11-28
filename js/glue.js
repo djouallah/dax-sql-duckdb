@@ -8,7 +8,7 @@
 //                                  Fabric semantic view's folder), each read by dax-sql's formats/
 //   DROP SEMANTIC VIEW [IF EXISTS] v
 //   REFRESH SEMANTIC VIEW v        the view framed again on its OneLake tables' current snapshots
-//   SHOW SEMANTIC VIEWS | DIMENSIONS IN v [FOR METRIC m] | METRICS IN v, DESCRIBE v
+//   SHOW SEMANTIC VIEWS | DIMENSIONS IN v [FOR METRIC m] | METRICS IN v, DESCRIBE [SEMANTIC VIEW] v
 //                                  the rows, as VALUES
 //   any other statement            each model query compiled in place by compileStatement
 // The extension (src/js_engine.cpp) calls the functions on globalThis.dax_sql with strings;
@@ -547,6 +547,8 @@ function ownStatement(toks) {
     return [show(dims ? 'dimensions' : 'metrics', name, metric)];
   }
   if (r.word('DESCRIBE') || r.word('DESC')) {
+    // DESCRIBE SEMANTIC VIEW v names a view, so one that does not exist is an error
+    const semantic = r.words('SEMANTIC', 'VIEW');
     if (r.done()) return null;
     let parts;
     try {
@@ -556,8 +558,8 @@ function ownStatement(toks) {
       return null;
     }
     const v = views.get(lc(parts[parts.length - 1]));
-    if (!v) return null;
-    return [describe(view(v.name))];
+    if (!v && !semantic) return null;
+    return [describe(view(v ? v.name : parts[parts.length - 1]))];
   }
   return null;
 }
@@ -600,12 +602,20 @@ function bindSql(sql) {
   const s = list[0];
   const r = reader(s.toks);
   if (r.word('DESCRIBE') || r.word('DESC')) {
+    const semantic = r.words('SEMANTIC', 'VIEW');
+    let parts = null;
     try {
-      const parts = r.qualified();
+      parts = r.qualified();
       r.end();
+    } catch {
+      parts = null;
+    }
+    if (parts) {
       const v = views.get(lc(parts[parts.length - 1]));
       if (v) return describe(view(v.name));
-    } catch {}
+      // DESCRIBE SEMANTIC VIEW names a view: one that does not exist is an error of its own
+      if (semantic) view(parts[parts.length - 1]);
+    }
   }
   const out = statementSql(s);
   return out === s.text ? '' : out;

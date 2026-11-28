@@ -92,6 +92,9 @@ check("a model query in a CTE", con.sql(with_cte).fetchall(), con.execute(with_c
 described = con.sql("DESCRIBE contoso")
 described.show()
 check("DESCRIBE has the measure", "Orders" in [r[0] for r in described.fetchall()], True)
+semantic = con.sql("DESCRIBE SEMANTIC VIEW contoso")
+semantic.show()
+check("DESCRIBE SEMANTIC VIEW == DESCRIBE", semantic.fetchall(), con.sql("DESCRIBE contoso").fetchall())
 
 # A relation over a model query, built on further in Python
 con.sql(query).filter("orders > 0").order("amount DESC").limit(3).show()

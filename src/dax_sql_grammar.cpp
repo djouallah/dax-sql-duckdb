@@ -10,8 +10,12 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/peg/transformer/peg_transformer.hpp"
 #include "duckdb/parser/statement/call_statement.hpp"
+#include "duckdb/parser/statement/select_statement.hpp"
+#include "duckdb/parser/tableref/subqueryref.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/planner/extension_callback.hpp"
 
@@ -27,7 +31,8 @@ namespace {
 // keywords, so they stay usable as names. Every rule is prefixed DaxSql, so the grammar can be
 // active beside another extension's.
 const char *const DAX_SQL_RULES[] = {
-    "DaxSqlStatement <- DaxSqlCreateStmt / DaxSqlDropStmt / DaxSqlRefreshStmt / DaxSqlShowStmt",
+    "DaxSqlStatement <- DaxSqlCreateStmt / DaxSqlDropStmt / DaxSqlRefreshStmt / DaxSqlShowStmt / "
+    "DaxSqlDescribeStmt",
 
     // 'CREATE' ('OR' 'REPLACE')? 'SEMANTIC' 'VIEW' IfNotExists? QualifiedName 'FROM' DaxSqlString
     "DaxSqlCreateStmt <- 'CREATE' DaxSqlOrReplace? 'SEMANTIC' 'VIEW' IfNotExists? QualifiedName 'FROM' "
@@ -47,8 +52,13 @@ const char *const DAX_SQL_RULES[] = {
     "DaxSqlMemberKind <- 'DIMENSIONS' / 'METRICS'",
     "DaxSqlForMetric <- 'FOR' 'METRIC' ColId",
 
-    // (SHOW SEMANTIC ...) where a table can be
+    // DESCRIBE v, said of a semantic view
+    "DaxSqlDescribeStmt <- DaxSqlDescribeWord 'SEMANTIC' 'VIEW' QualifiedName",
+    "DaxSqlDescribeWord <- 'DESCRIBE' / 'DESC'",
+
+    // (SHOW SEMANTIC ...) and (DESCRIBE SEMANTIC VIEW v) where a table can be
     "DaxSqlShowTableRef <- Parens(DaxSqlShowStmt) TableAlias?",
+    "DaxSqlDescribeTableRef <- Parens(DaxSqlDescribeStmt) TableAlias?",
 };
 
 //===--------------------------------------------------------------------===//
@@ -193,6 +203,29 @@ unique_ptr<SQLStatement> TransformDaxSqlShowStmt(PEGTransformer &transformer, Pa
 	return CallOf(std::move(ref->Cast<TableFunctionRef>().function));
 }
 
+// DaxSqlDescribeWord 'SEMANTIC' 'VIEW' QualifiedName: the statement DESCRIBE v is. Its text is the
+// statement's own, which the extension compiles to the view's rows as it does DESCRIBE v
+// (js/glue.js), with an error of its own when no such view exists.
+unique_ptr<SelectStatement> DescribeOf(PEGTransformer &transformer, ParseResult &parse_result) {
+	string name;
+	for (auto &part : NameValues(transformer, List(parse_result), 3)) {
+		auto text = StringValue::Get(part);
+		if (!text.empty()) {
+			name += (name.empty() ? "" : ".") + KeywordHelper::WriteQuoted(text, '"');
+		}
+	}
+	Parser parser(ParserOptions::Builtin());
+	parser.ParseQuery("DESCRIBE " + name);
+	if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
+		throw ParserException("DESCRIBE SEMANTIC VIEW %s", name);
+	}
+	return unique_ptr_cast<SQLStatement, SelectStatement>(std::move(parser.statements[0]));
+}
+
+unique_ptr<SQLStatement> TransformDaxSqlDescribeStmt(PEGTransformer &transformer, ParseResult &parse_result) {
+	return DescribeOf(transformer, parse_result);
+}
+
 unique_ptr<SQLStatement> TransformDaxSqlStatement(PEGTransformer &transformer, ParseResult &parse_result) {
 	return transformer.Transform<unique_ptr<SQLStatement>>(Choice(parse_result));
 }
@@ -207,6 +240,19 @@ unique_ptr<TableRef> TransformDaxSqlShowTableRef(PEGTransformer &transformer, Pa
 		result->column_name_alias = alias.column_name_alias;
 	}
 	return result;
+}
+
+// Parens(DaxSqlDescribeStmt) TableAlias?
+unique_ptr<TableRef> TransformDaxSqlDescribeTableRef(PEGTransformer &transformer, ParseResult &parse_result) {
+	auto &list = List(parse_result);
+	auto describe = DescribeOf(transformer, PEGTransformerFactory::ExtractResultFromParens(list.GetChild(0)));
+	auto result = make_uniq<SubqueryRef>(std::move(describe));
+	if (Present(list, 1)) {
+		auto alias = transformer.Transform<TableAlias>(Optional(list, 1));
+		result->alias = alias.name;
+		result->column_name_alias = alias.column_name_alias;
+	}
+	return std::move(result);
 }
 
 //===--------------------------------------------------------------------===//
@@ -308,6 +354,7 @@ vector<GrammarChange> DaxSqlGrammarExtension::GetChanges() const {
 	// (DROP VIEW, SHOW <table>, a parenthesized subquery)
 	changes.push_back(GrammarChange::PrependChoice("Statement", "DaxSqlStatement"));
 	changes.push_back(GrammarChange::PrependChoice("InnerTableRef", "DaxSqlShowTableRef"));
+	changes.push_back(GrammarChange::PrependChoice("InnerTableRef", "DaxSqlDescribeTableRef"));
 
 	SetTransform(changes, "DaxSqlStatement", TransformDaxSqlStatement);
 	SetTransform(changes, "DaxSqlCreateStmt", TransformDaxSqlCreateStmt);
@@ -315,6 +362,8 @@ vector<GrammarChange> DaxSqlGrammarExtension::GetChanges() const {
 	SetTransform(changes, "DaxSqlRefreshStmt", TransformDaxSqlRefreshStmt);
 	SetTransform(changes, "DaxSqlShowStmt", TransformDaxSqlShowStmt);
 	SetTransform(changes, "DaxSqlShowTableRef", TransformDaxSqlShowTableRef);
+	SetTransform(changes, "DaxSqlDescribeStmt", TransformDaxSqlDescribeStmt);
+	SetTransform(changes, "DaxSqlDescribeTableRef", TransformDaxSqlDescribeTableRef);
 	SetTransform(changes, "DaxSqlString", TransformDaxSqlString);
 	return changes;
 }

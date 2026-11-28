@@ -215,6 +215,25 @@ SHOW SEMANTIC METRICS IN contoso;
 statement ok
 DESCRIBE contoso;
 
+# DESCRIBE SEMANTIC VIEW v is DESCRIBE v, as a statement and as a table
+statement ok
+DESCRIBE SEMANTIC VIEW contoso;
+
+query I
+SELECT (SELECT count(*) FROM (DESCRIBE SEMANTIC VIEW contoso)) = (SELECT count(*) FROM (DESCRIBE contoso));
+----
+true
+
+query II
+SELECT column_type, extra FROM (DESC SEMANTIC VIEW memory.main.contoso) d WHERE column_name = 'Orders';
+----
+BIGINT	measure
+
+statement error
+DESCRIBE SEMANTIC VIEW nothing;
+----
+semantic view nothing does not exist
+
 statement error
 SHOW SEMANTIC METRICS IN nothing;
 ----
