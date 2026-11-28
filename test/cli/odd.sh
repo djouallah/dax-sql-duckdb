@@ -61,7 +61,9 @@ crlf() {
 }
 case_ "a script with Windows line endings (.read)" crlf
 
-oneline() { duck -bail -c "LOAD '$EXT'; $(tr '\n' ' ' < "$W/setup.sql") $Q; SHOW SEMANTIC VIEWS; DROP SEMANTIC VIEW contoso;"; }
+oneline() {
+  duck -bail -c "LOAD '$EXT'; $(tr '\n' ' ' < "$W/tables.sql") CREATE SEMANTIC VIEW contoso FROM '$MODEL'; $Q; SHOW SEMANTIC VIEWS; DROP SEMANTIC VIEW contoso;"
+}
 case_ "everything on one line" oneline
 
 multiline() {

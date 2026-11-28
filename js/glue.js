@@ -72,14 +72,20 @@ function toTmsl(path, text) {
 function build(h) {
   const options = {};
   const pins = h.frame?.pins ?? {};
+  // A view kept in a database other than the session's first (a file attached later) reads its
+  // other tables there, not on the search path. A shim until djouallah/dax-sql#31: the default
+  // name, as dax-sql writes it, qualified with that database (and the view's schema if it has none).
+  const own = t => (h.own ? `${ident(h.own)}.${ident(t.source?.schema || h.schema)}.${ident(t.source?.entity ?? t.name)}` : undefined);
   if (h.lake.size && !h.offline) {
     options.tableSource = t => {
       const l = h.lake.get(lc(t.name));
-      if (!l) return undefined;
+      if (!l) return own(t);
       const name = `${ident(l.catalog)}.${ident(l.schema)}.${ident(l.entity)}`;
       const at = pins[lc(t.name)];
       return at == null ? name : `(SELECT * FROM ${name} AT (VERSION => ${at}))`;
     };
+  } else if (h.own) {
+    options.tableSource = own;
   }
   const facts = h.frame?.facts;
   if (facts && Object.keys(facts).length) options.facts = facts;
@@ -95,15 +101,16 @@ const viewName = h => [h.db, h.schema, h.name].map(ident).join('.');
 
 // Defines a view from its file's text. mode: 'create' (an error if it exists), 'replace',
 // 'if_not_exists', or 'restore' (a view stored in a database: an error is kept, not thrown).
-// Returns 'created' or 'exists', and the OneLake catalogs to attach, one per line after it.
-function define(db, schema, name, path, text, mode) {
+// own: the database to read the view's other tables in ('' : the search path). Returns 'created'
+// or 'exists', and the OneLake catalogs to attach, one per line after it.
+function define(db, schema, name, path, text, mode, own = '') {
   const old = hosts.get(keyOf({ db, schema, name }));
   if (old && mode === 'create') throw fail(`semantic view ${name} already exists`, 'CATALOG');
   if (old && mode === 'if_not_exists') return 'exists';
   let h;
   try {
     const bim = toTmsl(path, text);
-    h = { db, schema, name, path, bim, lake: oneLake(bim), offline: null, frame: null, frameError: null };
+    h = { db, schema, name, path, own, bim, lake: oneLake(bim), offline: null, frame: null, frameError: null };
   } catch (e) {
     if (mode !== 'restore') throw e;
     hosts.set(keyOf({ db, schema, name }), { db, schema, name, path, error: e.message });

@@ -52,6 +52,13 @@ struct DaxSqlState {
 	//! The databases whose views are defined: those at LOAD, and each attached since (#8)
 	std::mutex databases_lock;
 	std::set<string> databases;
+	//! The session's first database: a view kept there reads its tables on the search path; one
+	//! kept in another database reads them in it
+	string home;
+
+	string Own(const string &db) const {
+		return StringUtil::Lower(db) == StringUtil::Lower(home) ? "" : db;
+	}
 
 	void RefreshNames() {
 		auto text = js.Call("names", {});
@@ -765,7 +772,8 @@ static DefinedView DefineView(ClientContext &context, DaxSqlState &state, const 
 		v.schema = DEFAULT_SCHEMA;
 	}
 	v.text = ReadModel(context, v.path);
-	auto outcome = StringUtil::Split(state.js.Call("define", {v.db, v.schema, v.name, v.path, v.text, mode}), '\n');
+	auto outcome = StringUtil::Split(
+	    state.js.Call("define", {v.db, v.schema, v.name, v.path, v.text, mode, state.Own(v.db)}), '\n');
 	state.RefreshNames();
 	if (outcome.size() > 1) {
 		Connection con(*context.db);
@@ -848,8 +856,9 @@ static void UndoViewChange(ClientContext &context, DaxSqlState &state, const Vie
 		Framing guard;
 		Connection con(*context.db);
 		if (undo.existed) {
-			auto outcome = StringUtil::Split(
-			    state.js.Call("define", {undo.db, undo.schema, undo.name, undo.path, undo.text, "replace"}), '\n');
+			auto outcome = StringUtil::Split(state.js.Call("define", {undo.db, undo.schema, undo.name, undo.path,
+			                                                          undo.text, "replace", state.Own(undo.db)}),
+			                                 '\n');
 			state.RefreshNames();
 			if (outcome.size() > 1) {
 				auto error = AttachOneLake(con, nullptr, outcome);
@@ -1033,7 +1042,8 @@ static void RestoreViews(DatabaseInstance &db, DaxSqlState &state, const string 
 		auto from = KeywordHelper::WriteQuoted(database, '"') + "." + KeywordHelper::WriteQuoted(schema, '"');
 		auto views = QueryRows(con, "SELECT view_name, path, definition FROM " + from + ".dax_sql_semantic_views");
 		for (auto &view : views) {
-			auto outcome = state.js.Call("define", {database, schema, view[0], view[1], view[2], "restore"});
+			auto outcome =
+			    state.js.Call("define", {database, schema, view[0], view[1], view[2], "restore", state.Own(database)});
 			// Not attached (no secret yet, no azure extension): the view reads the search path.
 			auto lines = StringUtil::Split(outcome, '\n');
 			auto error = AttachOneLake(con, nullptr, lines);
@@ -1179,6 +1189,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(set_facts);
 
 	state->databases = StoringDatabases(DatabaseManager::Get(db));
+	for (auto &attached : DatabaseManager::Get(db).GetDatabases()) {
+		if (attached->IsInitialDatabase()) {
+			state->home = attached->GetName().GetIdentifierName();
+		}
+	}
 	RestoreViews(db, *state);
 
 	// The statements: grammar rules (dax_sql_grammar.cpp). The model queries: compiled when they fail
