@@ -101,4 +101,16 @@ con.sql(query).filter("orders > 0").order("amount DESC").limit(3).show()
 
 con.sql("DROP SEMANTIC VIEW contoso").show()
 check("dropped", con.sql("SHOW SEMANTIC VIEWS").fetchall(), [])
+
+# #3, a probe (it does not fail the run): LOAD and CREATE SEMANTIC VIEW in one string
+for label, run in [
+    ("sql", lambda c, text: c.sql(text)),
+    ("execute", lambda c, text: c.execute(text)),
+]:
+    fresh = duckdb.connect(config={"allow_unsigned_extensions": "true"})
+    try:
+        run(fresh, f"LOAD '{EXT}'; CREATE SEMANTIC VIEW probe FROM '{MODEL}';")
+        print(f"probe #3 {label}: one string works")
+    except Exception as error:  # noqa: BLE001
+        print(f"probe #3 {label}: {type(error).__name__}: {str(error).splitlines()[0]}")
 print("all ok")
