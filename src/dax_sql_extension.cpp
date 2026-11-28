@@ -222,7 +222,9 @@ static ParserOverrideResult DaxSqlParserOverride(ParserExtensionInfo *info, cons
 			if (!fresh || !SwapBody(*statement, *fresh)) {
 				continue;
 			}
-			statement->query = sql;
+			// The statement keeps its own text: its location and length are in the text parsed, and
+			// a client takes the text as the query (the Python client wraps it again to show it,
+			// which compiles it again here).
 			compiled = true;
 		}
 		if (!compiled) {

@@ -38,8 +38,8 @@ _seam.submit = _relation._seam.submit = _spy_submit
 _seam.bind = _relation._seam.bind = _spy_bind
 
 
-def _report(*_):
-    traceback.print_exc()
+def _report(kind, error, trace):
+    traceback.print_exception(kind, error, trace)
     for kind, sql in SENT[-4:]:
         print(f"===== {kind}\n{sql}")
         if kind == "submit" or not sql.startswith("<parsed>"):
