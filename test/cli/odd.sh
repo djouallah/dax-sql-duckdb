@@ -19,7 +19,12 @@ Q='SELECT Product.Color, AGG(Orders) AS orders, AGG("Sales Amount") AS amount FR
 grep '^CREATE TABLE' test/cli/contoso.sql > "$W/tables.sql"
 { cat "$W/tables.sql"; echo "CREATE SEMANTIC VIEW contoso FROM '$MODEL';"; } > "$W/setup.sql"
 duck() { "$DUCKDB" -unsigned "$@"; }
-setup() { duck "$@" -bail -c "LOAD '$EXT'" -c ".read $W/setup.sql"; }
+# setup [database] [flags] -c ...: the database and the flags first, then LOAD and the view, then the commands
+setup() {
+  local first=()
+  while [ $# -gt 0 ] && [ "$1" != -c ]; do first+=("$1"); shift; done
+  duck "${first[@]}" -bail -c "LOAD '$EXT'" -c ".read $W/setup.sql" "$@"
+}
 
 # case <name> <command...>: the command must succeed; its output is shown
 case_() {

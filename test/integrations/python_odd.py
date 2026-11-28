@@ -80,6 +80,12 @@ def one(con, sql):
     return con.sql(sql).fetchall()[0][0]
 
 
+def do(con, sql):
+    """A statement run to its end: True."""
+    con.execute(sql).fetchall()
+    return True
+
+
 def names(con):
     return [r[0] for r in con.sql("SELECT view_name FROM (SHOW SEMANTIC VIEWS) ORDER BY ALL").fetchall()]
 
@@ -188,7 +194,7 @@ def _():
     check("UNION ALL of two model queries", union == [("orders", ROWS), ("quantity", qty)], union)
     scalar = con.sql(f'SELECT ({ORDERS}) AS o, (SELECT count(*) FROM "Sales") AS s').fetchall()[0]
     check("a model query as a scalar subquery", scalar == (ROWS, ROWS), scalar)
-    pivot = con.sql(f"PIVOT ({Q}) ON Color USING sum(orders)").fetchall()
+    pivot = con.sql(f"PIVOT (SELECT Color, orders FROM ({Q})) ON Color USING sum(orders)").fetchall()
     check("PIVOT over a model query", len(pivot) == 1)
     ranked = con.sql(f"SELECT Color, rank() OVER (ORDER BY orders DESC) AS r FROM ({Q}) QUALIFY r = 1").fetchall()
     check("a window and QUALIFY over a model query", len(ranked) >= 1)
@@ -200,31 +206,51 @@ def _():
     check("ORDER BY a measure, LIMIT, OFFSET", top == expected, f"{top} vs {expected}")
     ratio = con.sql('SELECT AGG("Sales Amount") / AGG(Orders) AS per_order FROM contoso').fetchall()[0][0]
     total = one(con, 'SELECT AGG("Sales Amount") FROM contoso')
-    check("an expression of two measures", abs(float(ratio) - float(total) / ROWS) < 1e-9, ratio)
+    # a DECIMAL measure over a count stays a DECIMAL (of scale 4) in DuckDB
+    check("an expression of two measures", abs(float(ratio) - float(total) / ROWS) < 1e-4, ratio)
 
 
-@scenario("DuckDB's own statements around a model query: DESCRIBE, SUMMARIZE, EXPLAIN ANALYZE, COPY, PREPARE, a macro")
+@scenario("DuckDB's own statements around a model query, each on its own")
 def _():
     con = connect()
-    described = con.sql(f"DESCRIBE {Q}").fetchall()
-    check("DESCRIBE a model query", [r[0] for r in described] == ["Color", "orders", "amount"], described)
-    con.sql(f"SUMMARIZE {Q}").show()
-    con.sql(f"EXPLAIN ANALYZE {Q}").fetchall()
-    out = os.path.join(TMP, "orders.parquet").replace("\\", "/")
-    con.sql(f"COPY ({Q}) TO '{out}' (FORMAT parquet)")
-    check("COPY a model query to parquet", con.sql(f"SELECT * FROM '{out}' ORDER BY Color").fetchall() == BASE)
+    parquet = os.path.join(TMP, "orders.parquet").replace("\\", "/")
     csv = os.path.join(TMP, "orders.csv").replace("\\", "/")
-    con.sql(Q).write_csv(csv)
-    check("relation.write_csv", len(con.sql(f"SELECT * FROM read_csv('{csv}')").fetchall()) == len(BASE))
-    con.sql(f"PREPARE by_colour AS {Q}")
-    check("PREPARE and EXECUTE", con.sql("EXECUTE by_colour").fetchall() == BASE)
-    con.sql(f"CREATE MACRO by_colour() AS TABLE {Q}")
-    check("a table macro over a model query", con.sql("SELECT * FROM by_colour()").fetchall() == BASE)
-    con.sql(Q).create("orders_t")
-    check("relation.create", con.sql("SELECT * FROM orders_t ORDER BY Color").fetchall() == BASE)
-    con.sql(Q).to_view("orders_v")
-    check("relation.to_view", con.sql("SELECT * FROM orders_v").fetchall() == BASE)
-    check("relation.sql_query() runs again", con.sql(con.sql(Q).sql_query()).fetchall() == BASE)
+    cases = {
+        "DESCRIBE a model query": lambda: [r[0] for r in con.sql(f"DESCRIBE {Q}").fetchall()]
+        == ["Color", "orders", "amount"],
+        "SUMMARIZE a model query": lambda: len(con.sql(f"SUMMARIZE {Q}").fetchall()) == 3,
+        "SUMMARIZE a model query in parentheses": lambda: len(con.sql(f"SUMMARIZE ({Q})").fetchall()) == 3,
+        "EXPLAIN ANALYZE a model query": lambda: len(con.sql(f"EXPLAIN ANALYZE {Q}").fetchall()) > 0,
+        "COPY a model query to parquet": lambda: do(con, f"COPY ({Q}) TO '{parquet}' (FORMAT parquet)")
+        and con.sql(f"SELECT * FROM '{parquet}' ORDER BY Color").fetchall() == BASE,
+        "relation.write_csv": lambda: [
+            con.sql(Q).write_csv(csv),
+            len(con.sql(f"SELECT * FROM read_csv('{csv}')").fetchall()) == len(BASE),
+        ][1],
+        "PREPARE and EXECUTE": lambda: do(con, f"PREPARE by_colour AS {Q}")
+        and con.sql("EXECUTE by_colour").fetchall() == BASE,
+        "a table macro over a model query": lambda: do(con, f"CREATE MACRO by_colour() AS TABLE {Q}")
+        and con.sql("SELECT * FROM by_colour()").fetchall() == BASE,
+        "INSERT INTO ... a model query": lambda: do(
+            con, "CREATE TABLE orders_i (Color VARCHAR, orders BIGINT, amount DOUBLE)"
+        )
+        and do(con, f"INSERT INTO orders_i {Q}")
+        and len(con.sql("SELECT * FROM orders_i").fetchall()) == len(BASE),
+        "relation.create": lambda: [
+            con.sql(Q).create("orders_t"),
+            con.sql("SELECT * FROM orders_t ORDER BY Color").fetchall() == BASE,
+        ][1],
+        "relation.to_view": lambda: [
+            con.sql(Q).to_view("orders_v"),
+            con.sql("SELECT * FROM orders_v").fetchall() == BASE,
+        ][1],
+        "relation.sql_query() runs again": lambda: con.sql(con.sql(Q).sql_query()).fetchall() == BASE,
+    }
+    for name, run in cases.items():
+        try:
+            check(name, run())
+        except duckdb.Error as error:
+            check(name, False, f"{type(error).__name__}: {str(error).splitlines()[0]}")
 
 
 @scenario("the data changes under the view: rows added, a table dropped and made again")
