@@ -650,8 +650,7 @@ static unique_ptr<FunctionData> RefreshBind(ClientContext &context, TableFunctio
 	{
 		Connection con(*context.db);
 		// The view's lakehouses attached afresh: their current snapshots, not the cached metadata
-		auto catalogs = StringUtil::Split(state.js.Call("catalogs", {name}), '
-');
+		auto catalogs = StringUtil::Split(state.js.Call("catalogs", {name}), '\n');
 		auto error = AttachOneLake(con, &context, catalogs);
 		if (!error.empty()) {
 			state.js.Call("frame_failed", {name, "pins", error});
