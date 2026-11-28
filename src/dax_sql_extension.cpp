@@ -154,6 +154,8 @@ static bool SwapBody(SQLStatement &statement, SQLStatement &fresh) {
 
 static void CatchUpDatabases(ClientContext &context, DaxSqlState &state);
 static vector<vector<string>> QueryRows(Connection &con, const string &sql);
+static vector<string> Statement(DaxSqlState &state, TableFunctionBindInput &input, const char *function,
+                                const string &kind, idx_t size);
 
 //! What a CREATE or DROP SEMANTIC VIEW changed, to put back if its transaction rolls back (#7): the
 //! view's stored definition before it (existed false: there was no view)
