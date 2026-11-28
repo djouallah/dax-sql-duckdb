@@ -159,18 +159,27 @@ The extension is written in C++ and has three parts.
      DuckDB's PEG parser (`src/dax_sql_grammar.cpp`), active on every connection: the
      connections opened after `LOAD` at once, the one that ran `LOAD` once that statement ends
      (so `LOAD` and a `CREATE SEMANTIC VIEW` are two statements, not one string). Each is
-     lowered to a call of the extension's table functions, `SELECT * FROM dax_sql_create(…)`,
+     lowered to a call of the extension's table functions, `CALL dax_sql_create(…)`,
      `dax_sql_drop`, `dax_sql_refresh`, `dax_sql_show`, which do the work or return the rows.
+     A `CALL`, not a `SELECT`: a client runs it at once and keeps its rows, where the Python
+     client would read a `SELECT`'s text again as a subquery when it is shown.
      `(SHOW SEMANTIC …)` is a table wherever DuckDB takes one. The grammar's plumbing follows
      the `semantic_layer` community extension's (`THIRD_PARTY_NOTICES.md`).
-   - **Model queries** are plain SQL: DuckDB parses them, and binding fails on the view's name.
-     On that error (`OnPlanningError`, a hook on every connection) the statement's own text
-     goes to dax-sql's `compileStatement(text, name)`, once per view it names. That finds each
+   - **Model queries** are plain SQL, compiled as they are parsed: a parser override
+     (`DaxSqlParserOverride`; `LOAD` sets `allow_parser_override_extension` to `fallback`
+     unless it was set already) parses a text that names a view, and sends each statement that
+     names one to dax-sql's `compileStatement(text, name)`, once per view it names. A client
+     that binds a statement before it runs it (the Python client's `con.sql`, through
+     `ClientContext::BindStatement`) binds plain SQL. A text that holds one of the extension's
+     own statements is parsed as usual, since the views it creates change what the statements
+     after it compile to: those compile when binding fails on the view's name
+     (`OnPlanningError`, a hook on every connection), as does a statement that did not compile
+     at parse time, whose compiler error is reported then. That finds each
      model query (its scanner skips strings, quoted names, `$$` strings and comments), compiles
      it, and puts the SQL in its place. The extension parses what comes back, puts its body in
      the statement's place, and DuckDB binds, optimises and runs the whole statement as one
      query. Filters and column choices push down into the compiled SQL, and the result
-     streams. `DESCRIBE sales` goes the same way, as its rows. There is no parser override.
+     streams. `DESCRIBE sales` goes the same way, as its rows.
    - **Errors:** the compiler's errors (`SYNTAX`, `SEMANTIC`, `UNSUPPORTED`) become DuckDB
      errors that keep its message.
 3. **The compiler, unchanged.** `src/` and the readers in `formats/` (with `yaml` 2.8.1, the

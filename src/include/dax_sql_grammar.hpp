@@ -7,9 +7,12 @@
 //   SHOW SEMANTIC VIEWS | DIMENSIONS IN v [FOR METRIC m] | METRICS IN v
 //   (SHOW SEMANTIC ...) [alias], wherever a table can be
 //
-// Each statement is lowered to SELECT * FROM dax_sql_create / dax_sql_drop / dax_sql_refresh /
-// dax_sql_show(...), the extension's table functions. Model queries are plain SQL and need no
-// grammar: they are compiled when they fail to bind (dax_sql_extension.cpp, DaxSqlRebindState).
+// Each statement is lowered to CALL dax_sql_create / dax_sql_drop / dax_sql_refresh /
+// dax_sql_show(...), the extension's table functions: a CALL, not a SELECT, so that a client
+// runs it at once and keeps its rows (the Python client wraps a SELECT's text in a subquery).
+// (SHOW SEMANTIC ...) as a table is the table function itself. Model queries are plain SQL and
+// need no grammar: they are compiled as they are parsed, or when they fail to bind
+// (dax_sql_extension.cpp, DaxSqlParserOverride and DaxSqlRebindState).
 //
 // The grammar plumbing (transforms, activation on every connection, the CLI's 'shell' grammar)
 // follows altertable-ai/duckdb-semantic_layer's src/parser/semantic_layer_grammar.cpp

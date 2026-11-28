@@ -22,6 +22,8 @@
 #include "duckdb/main/connection_manager.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/parser/parser.hpp"
+#include "duckdb/parser/parser_extension.hpp"
+#include "duckdb/parser/parser_options.hpp"
 #include "duckdb/parser/statement/copy_statement.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/statement/explain_statement.hpp"
@@ -167,6 +169,71 @@ public:
 private:
 	shared_ptr<DaxSqlState> state;
 };
+
+//===--------------------------------------------------------------------===//
+// Model queries compiled as they are parsed, so a client that binds a statement before it runs
+// it binds plain SQL. The Python client does (con.sql: ClientContext::BindStatement, which takes
+// no rebind), and so would every caller of a statement's schema. DuckDB calls a parser override
+// only when allow_parser_override_extension is not 'default': LOAD sets it to 'fallback', where a
+// text the override does not claim is parsed as usual.
+//
+// The override claims a text only when it compiled a model query in it. A text that holds one of
+// the extension's own statements (a CALL) is left to the usual parse: the views it creates or
+// replaces change what the statements after it compile to. A statement that does not compile
+// here is left as it is, and DaxSqlRebindState compiles it when it fails to bind, or reports the
+// compiler's error then.
+//===--------------------------------------------------------------------===//
+struct DaxSqlParserInfo : public ParserExtensionInfo {
+	explicit DaxSqlParserInfo(shared_ptr<DaxSqlState> state_p) : state(std::move(state_p)) {
+	}
+	shared_ptr<DaxSqlState> state;
+};
+
+static ParserOverrideResult DaxSqlParserOverride(ParserExtensionInfo *info, const string &query,
+                                                 ParserOptions &options) {
+	auto &state = *info->Cast<DaxSqlParserInfo>().state;
+	if (framing || !options.context || !state.MightBeOurs(query)) {
+		return ParserOverrideResult();
+	}
+	try {
+		// the usual parse of the whole text, with this override off
+		auto usual = options;
+		usual.parser_override_setting = AllowParserOverride::DEFAULT_OVERRIDE;
+		Parser parser(usual);
+		parser.ParseQuery(query);
+		bool compiled = false;
+		for (auto &statement : parser.statements) {
+			if (statement->type == StatementType::CALL_STATEMENT) {
+				return ParserOverrideResult();
+			}
+			if (statement->query.empty() || !state.MightBeOurs(statement->query)) {
+				continue;
+			}
+			string sql;
+			try {
+				sql = state.js.Call("bind_sql", {statement->query});
+			} catch (std::exception &) {
+				continue;
+			}
+			if (sql.empty()) {
+				continue;
+			}
+			auto fresh = ParseOne(*options.context, sql);
+			if (!fresh || !SwapBody(*statement, *fresh)) {
+				continue;
+			}
+			statement->query = sql;
+			compiled = true;
+		}
+		if (!compiled) {
+			return ParserOverrideResult();
+		}
+		return ParserOverrideResult(std::move(parser.statements));
+	} catch (std::exception &) {
+		// a syntax error is the usual parse's to report
+		return ParserOverrideResult();
+	}
+}
 
 class DaxSqlConnectionCallback : public ExtensionCallback {
 public:
@@ -898,6 +965,21 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ExtensionCallback::Register(DBConfig::GetConfig(db), make_shared_ptr<DaxSqlConnectionCallback>(state));
 	for (auto &connection : db.GetConnectionManager().GetConnectionList()) {
 		connection->registered_state->GetOrCreate<DaxSqlRebindState>(DaxSqlRebindState::KEY, state);
+	}
+
+	// ... and as they are parsed (DaxSqlParserOverride), with the parser override allowed unless the
+	// user chose a setting of their own
+	ParserExtension parser;
+	parser.parser_override = DaxSqlParserOverride;
+	parser.parser_info = make_shared_ptr<DaxSqlParserInfo>(state);
+	ParserExtension::Register(DBConfig::GetConfig(db), std::move(parser));
+	{
+		Connection con(db);
+		auto current = con.Query("SELECT current_setting('allow_parser_override_extension')");
+		if (!current->HasError() && current->RowCount() == 1 &&
+		    StringUtil::CIEquals(current->GetValue(0, 0).ToString(), "default")) {
+			con.Query("SET GLOBAL allow_parser_override_extension = 'fallback'");
+		}
 	}
 }
 

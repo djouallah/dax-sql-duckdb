@@ -85,6 +85,9 @@ jobs:
         run: |
           pip install -q duckdb==2.0.1
           python .github/scripts/run_tests.py "$EXT" test/sql/*.test
+      - name: The Python client, as a notebook uses it (test/integrations/python_client.py)
+        if: ${{ !cancelled() }}
+        run: python test/integrations/python_client.py "$EXT"
       - name: DuckDB v2.0.1 CLI
         if: ${{ !cancelled() }}
         run: |

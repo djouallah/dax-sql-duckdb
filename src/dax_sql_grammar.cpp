@@ -10,10 +10,8 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
-#include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/parser/peg/transformer/peg_transformer.hpp"
-#include "duckdb/parser/query_node/select_node.hpp"
-#include "duckdb/parser/statement/select_statement.hpp"
+#include "duckdb/parser/statement/call_statement.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/planner/extension_callback.hpp"
 
@@ -107,23 +105,26 @@ vector<Value> NameValues(PEGTransformer &transformer, ListParseResult &list, idx
 }
 
 //! A call of one of the extension's table functions
-unique_ptr<TableRef> Call(const string &function, vector<Value> args) {
+unique_ptr<ParsedExpression> Function(const string &function, vector<Value> args) {
 	vector<unique_ptr<ParsedExpression>> children;
 	for (auto &arg : args) {
 		children.push_back(ConstantExpression::FromValue(std::move(arg)));
 	}
+	return make_uniq<FunctionExpression>(Identifier(function), std::move(children));
+}
+
+//! The call where a table can be: (SHOW SEMANTIC ...)
+unique_ptr<TableRef> Call(const string &function, vector<Value> args) {
 	auto ref = make_uniq<TableFunctionRef>();
-	ref->function = make_uniq<FunctionExpression>(Identifier(function), std::move(children));
+	ref->function = Function(function, std::move(args));
 	return std::move(ref);
 }
 
-//! SELECT * FROM <ref>
-unique_ptr<SQLStatement> SelectAll(unique_ptr<TableRef> ref) {
-	auto node = make_uniq<SelectNode>();
-	node->select_list.push_back(make_uniq<StarExpression>());
-	node->from_table = std::move(ref);
-	auto statement = make_uniq<SelectStatement>();
-	statement->node = std::move(node);
+//! CALL <function>(...): a statement a client runs at once, as DuckDB binds it as SELECT * FROM <function>(...).
+//! A SELECT would be taken for a query and its text read again as a subquery, where CREATE SEMANTIC VIEW cannot be.
+unique_ptr<SQLStatement> CallOf(unique_ptr<ParsedExpression> function) {
+	auto statement = make_uniq<CallStatement>();
+	statement->function = std::move(function);
 	return std::move(statement);
 }
 
@@ -150,7 +151,7 @@ unique_ptr<SQLStatement> TransformDaxSqlCreateStmt(PEGTransformer &transformer, 
 	auto args = NameValues(transformer, list, 5);
 	args.push_back(Value(transformer.Transform<string>(list, 7)));
 	args.push_back(Value(or_replace ? "replace" : if_not_exists ? "if_not_exists" : "create"));
-	return SelectAll(Call("dax_sql_create", std::move(args)));
+	return CallOf(Function("dax_sql_create", std::move(args)));
 }
 
 // 'DROP' 'SEMANTIC' 'VIEW' IfExists? QualifiedName
@@ -158,13 +159,13 @@ unique_ptr<SQLStatement> TransformDaxSqlDropStmt(PEGTransformer &transformer, Pa
 	auto &list = List(parse_result);
 	auto args = NameValues(transformer, list, 4);
 	args.push_back(Value::BOOLEAN(Present(list, 3)));
-	return SelectAll(Call("dax_sql_drop", std::move(args)));
+	return CallOf(Function("dax_sql_drop", std::move(args)));
 }
 
 // 'REFRESH' 'SEMANTIC' 'VIEW' QualifiedName
 unique_ptr<SQLStatement> TransformDaxSqlRefreshStmt(PEGTransformer &transformer, ParseResult &parse_result) {
 	auto args = NameValues(transformer, List(parse_result), 3);
-	return SelectAll(Call("dax_sql_refresh", {args[2]}));
+	return CallOf(Function("dax_sql_refresh", {args[2]}));
 }
 
 // 'SHOW' 'SEMANTIC' (DaxSqlShowViews / DaxSqlShowMembers): dax_sql_show(kind, view, metric)
@@ -188,7 +189,8 @@ unique_ptr<TableRef> ShowCall(PEGTransformer &transformer, ParseResult &parse_re
 }
 
 unique_ptr<SQLStatement> TransformDaxSqlShowStmt(PEGTransformer &transformer, ParseResult &parse_result) {
-	return SelectAll(ShowCall(transformer, parse_result));
+	auto ref = ShowCall(transformer, parse_result);
+	return CallOf(std::move(ref->Cast<TableFunctionRef>().function));
 }
 
 unique_ptr<SQLStatement> TransformDaxSqlStatement(PEGTransformer &transformer, ParseResult &parse_result) {
