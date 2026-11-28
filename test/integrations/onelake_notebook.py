@@ -35,7 +35,8 @@ con.sql("CREATE OR REPLACE SECRET onelake (TYPE azure, PROVIDER credential_chain
 
 # The YAML from the lakehouse, its OneLake URL naming the lakehouse
 text = con.sql(f"SELECT content FROM read_text('{FOLDER}/nem.yaml')").fetchall()[0][0]
-url = re.compile(r"(https://onelake\.dfs\.fabric\.microsoft\.com/)[^/\"'\s]+/[^/\"'\s)]+")
+# a path segment ends at a slash, a quote, a backslash (a YAML string's escaped quote) or a space
+url = re.compile(r"(https://onelake\.dfs\.fabric\.microsoft\.com/)[^/\\\"'\s]+/[^/\\\"'\s)]+")
 check("the YAML has a OneLake URL", url.search(text) is not None,
       "\n" + "\n".join(line for line in text.splitlines() if "onelake" in line.lower() or "expression" in line.lower())[:2000])
 text = url.sub(lambda m: f"{m.group(1)}{WS}/{LH}", text)
