@@ -71,7 +71,7 @@ def main():
     if not facts["orphans"]:
         sys.exit(f"nem's relationships were not checked: {frame}")
     with_answers = json.dumps(facts)
-    without = json.dumps({"pins": facts["pins"], "orphans": {}})
+    without = json.dumps({"pins": facts["pins"], "orphans": {}, "trailingSpaces": facts.get("trailingSpaces", {})})
     found = sorted(k for k, v in facts["orphans"].items() if v)
     print(f"{len(facts['orphans'])} relationships checked; with keys their one side lacks: {found or 'none'}")
 

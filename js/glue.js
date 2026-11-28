@@ -14,9 +14,8 @@
 // The extension (src/js_engine.cpp) calls the functions on globalThis.dax_sql with strings;
 // an error carries a `code`: dax-sql's SYNTAX, SEMANTIC, UNSUPPORTED, or CATALOG, INPUT here.
 import { createCompiler } from 'dax-sql/src/index.js';
-import { tmslToModel } from 'dax-sql/formats/tmsl.js';
-import { tmdlToTmsl } from 'dax-sql/formats/tmdl.js';
-import { ossieToTmsl } from 'dax-sql/formats/ossie.js';
+import { tmslToModel, directLakeTables } from 'dax-sql/formats/tmsl.js';
+import { readModel } from 'dax-sql/formats/model.js';
 import { parse as parseYaml } from 'yaml/dist/index.js';
 
 const lc = s => String(s).toLowerCase();
@@ -155,76 +154,32 @@ function view(name) {
   return v;
 }
 
-// The bim's Direct Lake tables: the catalog each one's lakehouse is attached as (the
-// expression's OneLake URL names the workspace and the lakehouse), by table name.
+// The bim's Direct Lake tables, where dax-sql's directLakeTables says they are (a lakehouse named
+// by its workspace's and its own GUIDs), each with the catalog its lakehouse is attached as. A
+// table named by its lakehouse's name in the model's workspace is not attached yet: it is read
+// from the search path.
 function oneLake(bim) {
-  const text = e => (Array.isArray(e) ? e.join('\n') : String(e ?? ''));
-  const url = /onelake\.dfs\.fabric\.microsoft\.com\/([0-9a-f-]{36})\/([0-9a-f-]{36})/i;
-  const lakes = new Map();
-  for (const e of bim.model?.expressions ?? []) {
-    const m = url.exec(text(e.expression));
-    if (m) lakes.set(e.name, { workspace: lc(m[1]), item: lc(m[2]), catalog: `dax_sql_onelake_${lc(m[2]).replace(/-/g, '')}` });
-  }
   const tables = new Map();
-  for (const t of bim.model?.tables ?? []) {
-    const s = t.partitions?.[0]?.source;
-    const lake = s?.expressionSource && lakes.get(s.expressionSource);
-    if (lake) tables.set(lc(t.name), { ...lake, schema: s.schemaName ?? 'dbo', entity: s.entityName ?? t.name });
+  for (const [table, l] of directLakeTables(bim)) {
+    if (l.inWorkspace || !l.workspace) continue;
+    tables.set(table, { ...l, catalog: `dax_sql_onelake_${l.item.replace(/-/g, '')}` });
   }
   return tables;
 }
 
-// An Apache Ossie document as TMSL, by dax-sql's reader; or a Fabric semantic view's folder of them
-// (Context/Semantic Views/<view>/), { "<path>": doc }, which dax-sql merges as Fabric does on publish.
-function ossieTmsl(path, doc, folder = false) {
-  const skipped = [];
-  if (!folder && (!doc || typeof doc !== 'object' || !Array.isArray(doc.datasets))) throw new Error('it has no datasets');
-  const bim = ossieToTmsl(doc, { onSkip: s => skipped.push(s.why) });
-  // A metric dax-sql cannot read is left out, as dax-sql does; a model left with none is refused.
-  const measures = (bim.model?.tables ?? []).reduce((n, t) => n + (t.measures?.length ?? 0), 0);
-  if (!measures && skipped.length) throw fail(`${path}: none of its metrics can be read: ${skipped.join('; ')}`, 'INPUT');
-  return bim;
-}
-
-// A model's file as TMSL, read by dax-sql's reader of its format, which its path says. A folder
-// comes from the extension as one JSON object, { "<path in it>": "<text>" }: its .tmdl files
-// (TMDL), or else its .yaml files (a Fabric semantic view's folder of Apache Ossie files).
-const FORMATS = 'a .bim (TMSL), a .tmdl or a folder of them (TMDL), or a .yaml / .yml or a folder of .yaml files (Apache Ossie)';
+// A model's file as TMSL, by dax-sql's readModel (the format its path says, the BOM dropped, a
+// model none of whose metrics can be read refused). A folder comes from the extension as one JSON
+// object, { "<path in it>": "<text>" }: its .tmdl files (TMDL), or else its .yaml files (a Fabric
+// semantic view's folder of Apache Ossie files, merged as Fabric merges them).
 function toTmsl(path, text) {
-  const body = String(text).replace(/^﻿/, '');
-  const read = (what, f) => {
+  let input = String(text);
+  if (!/\.(bim|tmdl|ya?ml)$/i.test(path)) {
     try {
-      return f();
-    } catch (e) {
-      if (e.code) throw e;
-      throw fail(`${path} is not ${what}: ${e.message}`, 'INPUT');
-    }
-  };
-  if (/\.bim$/i.test(path)) return read('a TMSL model', () => JSON.parse(body));
-  if (/\.tmdl$/i.test(path)) return read('a TMDL model', () => tmdlToTmsl(body));
-  if (/\.ya?ml$/i.test(path)) return read('an Apache Ossie model', () => ossieTmsl(path, parseYaml(body)));
-  let files = null;
-  try {
-    files = JSON.parse(body);
-  } catch {}
-  const folder = files && typeof files === 'object' && !Array.isArray(files) && Object.values(files).every(v => typeof v === 'string');
-  if (!folder) throw fail(`${path}: a semantic view is read from ${FORMATS}`, 'INPUT');
-  const names = Object.keys(files);
-  if (!names.length) throw fail(`${path}: the folder has no .tmdl or .yaml file`, 'INPUT');
-  if (names.every(n => /\.yaml$/i.test(n))) {
-    return read('a folder of Apache Ossie files', () => {
-      const docs = {};
-      for (const [file, text] of Object.entries(files)) {
-        try {
-          docs[file] = parseYaml(text.replace(/^﻿/, ''));
-        } catch (e) {
-          throw new Error(`${file}: ${e.message}`);
-        }
-      }
-      return ossieTmsl(path, docs, true);
-    });
+      const files = JSON.parse(input);
+      if (files && typeof files === 'object' && !Array.isArray(files)) input = files;
+    } catch {}
   }
-  return read('a TMDL model', () => tmdlToTmsl(files));
+  return readModel(path, input, { parseYaml }).bim;
 }
 
 // The view's compiler, from its model and what is known of where its tables are and what they
@@ -248,12 +203,10 @@ function build(v) {
       return s.schema ? `${ident(s.schema)}.${ident(s.entity)}` : ident(s.entity);
     };
   }
-  const orphans = v.frame?.orphans;
-  if (orphans && Object.keys(orphans).length) options.orphans = rel => orphans[rel.key];
-  // The text columns found to hold trailing spaces are read trimmed, as Power BI loads them; any
-  // other is read as stored (dax-sql's trailingSpaces: only true changes the SQL).
-  const padded = v.frame?.padded;
-  if (padded && Object.values(padded).some(Boolean)) options.trailingSpaces = c => padded[c.key] === true;
+  // What the frame found of the data at its snapshots (dax-sql's facts: the orphan keys, and the
+  // text columns read trimmed as Power BI loads them)
+  const facts = v.frame?.facts;
+  if (facts && Object.keys(facts).length) options.facts = facts;
   v.compiler = createCompiler(tmslToModel(v.bim), options);
 }
 
@@ -316,9 +269,10 @@ function frameSql(name) {
 }
 
 // The snapshots frameSql read (tab-separated, in its order) and when: the view is pinned to them.
-// Returns the statement that checks its relationships' keys at those snapshots (dax-sql's
-// orphanCheck), '' when it has none to check. A relationship is answered only when both its
-// tables are pinned: a table read as it is now could change under the answer.
+// Returns the statement that checks the data at those snapshots (dax-sql's factsCheck: which
+// relationships' many sides hold keys their one side lacks, which text columns hold trailing
+// spaces), '' when nothing can be checked. An answer counts only when every table it reads is
+// pinned (factsCheck's `tables`): a table read as it is now could change under it.
 function frame(name, row, at) {
   const v = view(name);
   const vals = String(row).split('\t');
@@ -326,74 +280,58 @@ function frame(name, row, at) {
   lakeTables(v).forEach((t, i) => {
     if (/^\d+$/.test(vals[i] ?? '')) pins[t] = vals[i];
   });
-  v.frame = { at, pins, orphans: {}, checked: [], padded: {}, paddedChecked: [] };
+  v.frame = { at, pins, facts: {}, check: null };
   build(v);
-  const { sql, rels } = v.compiler.orphanCheck();
-  v.frame.checked = rels.map(r => (pins[lc(r.many.table)] && pins[lc(r.one.table)] ? r.key : null));
-  return v.frame.checked.some(k => k) ? sql : '';
+  const { sql, read, tables } = v.compiler.factsCheck();
+  const pinned = list => (list ?? []).every(t => pins[lc(t)]);
+  const counts = Object.values(tables).some(byKey => Object.values(byKey).some(pinned));
+  v.frame.check = { read, tables, pinned };
+  return counts ? sql : '';
 }
 
-// The row of the statement frame returned: true where a relationship's many side holds a key its
-// one side lacks.
-function orphansFound(name, row) {
+// The row of the statement frame returned, read by dax-sql (factsCheck's read): the facts the
+// view's compiler is given, those of tables not pinned left out.
+function factsFound(name, row) {
   const v = view(name);
-  const vals = String(row).split('\t');
-  const orphans = {};
-  v.frame.checked.forEach((key, i) => {
-    if (key && (vals[i] === 'true' || vals[i] === 'false')) orphans[key] = vals[i] === 'true';
-  });
-  v.frame.orphans = orphans;
-  build(v);
-  return '';
-}
-
-// The statement that finds the text columns holding trailing spaces at the pinned snapshots
-// (dax-sql's trailingSpacesCheck), '' when none can be checked. A column is answered only when its
-// table is pinned: a table read as it is now could change under the answer.
-function paddedSql(name) {
-  const v = view(name);
-  if (!v.frame) return '';
-  const { sql, columns } = v.compiler.trailingSpacesCheck();
-  v.frame.paddedChecked = columns.map(c => (v.frame.pins[lc(c.table)] ? c.key : null));
-  return v.frame.paddedChecked.some(k => k) ? sql : '';
-}
-
-// The row of the statement paddedSql returned: true where a text column holds trailing spaces.
-function paddedFound(name, row) {
-  const v = view(name);
-  const vals = String(row).split('	');
-  const padded = {};
-  v.frame.paddedChecked.forEach((key, i) => {
-    if (key && (vals[i] === 'true' || vals[i] === 'false')) padded[key] = vals[i] === 'true';
-  });
-  v.frame.padded = padded;
+  const { read, tables, pinned } = v.frame.check;
+  const found = read(String(row).split('\t'));
+  const facts = {};
+  for (const kind of ['orphans', 'trailingSpaces']) {
+    const kept = Object.entries(found[kind] ?? {}).filter(([key]) => pinned(tables[kind]?.[key]));
+    if (kept.length) facts[kind] = Object.fromEntries(kept);
+  }
+  v.frame.facts = facts;
   build(v);
   return '';
 }
 
-// A step of the frame that failed ('pins', 'orphans' or 'trailing spaces'): what was found before
-// it stays, and SHOW SEMANTIC VIEWS says why.
+// A step of the frame that failed ('pins' or 'facts'): what was found before it stays, and SHOW
+// SEMANTIC VIEWS says why.
 function frameFailed(name, step, error) {
   const v = view(name);
   if (step === 'pins') v.frame = null;
-  else if (v.frame && step === 'orphans') v.frame.orphans = {};
-  else if (v.frame) v.frame.padded = {};
+  else if (v.frame) v.frame.facts = {};
   v.frameError = `${step}: ${String(error).split('\n')[0]}`;
   build(v);
   return '';
 }
 
-// The frame as JSON ({ pins, orphans, padded }), and a frame given as JSON: the drift check gives the
-// SQL dax-sql writes in Node the same frame as the extension's (.github/scripts/drift.py), and
-// the facts check compares answers with and without the orphans at the same snapshots.
+// The frame as JSON ({ pins, orphans, trailingSpaces }), and a frame given as JSON: the drift
+// check gives the SQL dax-sql writes in Node the same frame as the extension's
+// (.github/scripts/drift.py), and the facts check compares answers with and without the orphans
+// at the same snapshots.
 function facts(name) {
   const v = view(name);
-  return JSON.stringify({ pins: v.frame?.pins ?? {}, orphans: v.frame?.orphans ?? {}, padded: v.frame?.padded ?? {} });
+  const f = v.frame?.facts ?? {};
+  return JSON.stringify({ pins: v.frame?.pins ?? {}, orphans: f.orphans ?? {}, trailingSpaces: f.trailingSpaces ?? {} });
 }
 function setFacts(name, json) {
   const v = view(name);
   const f = JSON.parse(json);
-  v.frame = { at: v.frame?.at ?? null, pins: f.pins ?? {}, orphans: f.orphans ?? {}, checked: [], padded: f.padded ?? {}, paddedChecked: [] };
+  const given = {};
+  if (f.orphans && Object.keys(f.orphans).length) given.orphans = f.orphans;
+  if (f.trailingSpaces && Object.keys(f.trailingSpaces).length) given.trailingSpaces = f.trailingSpaces;
+  v.frame = { at: v.frame?.at ?? null, pins: f.pins ?? {}, facts: given, check: null };
   build(v);
   return '';
 }
@@ -404,14 +342,14 @@ function dataAsOf(v) {
   const f = v.frame;
   if (!f || !Object.keys(f.pins).length) return `current data (not pinned: ${v.frameError ?? 'no snapshot read'})`;
   const n = Object.keys(f.pins).length, all = lakeTables(v).length;
-  const answers = Object.values(f.orphans);
+  const answers = Object.values(f.facts.orphans ?? {});
   const found = answers.filter(Boolean).length;
   const checked = answers.length
     ? `${answers.length} relationships checked, ${found} with keys their one side lacks`
     : `relationships not checked${v.frameError ? ` (${v.frameError})` : ''}`;
   const unpinned = lakeTables(v).filter(t => !(t in f.pins));
   const read = unpinned.length ? ` (no snapshot, read as they are now: ${unpinned.join(', ')})` : '';
-  const texts = Object.entries(f.padded ?? {});
+  const texts = Object.entries(f.facts.trailingSpaces ?? {});
   const trimmed = texts.filter(([, x]) => x).map(([k]) => k.replace('|', '.'));
   const spaces = texts.length
     ? `; ${texts.length} text columns checked, ${trimmed.length ? `trimmed: ${trimmed.join(', ')}` : 'none with trailing spaces'}`
@@ -710,9 +648,7 @@ globalThis.dax_sql = {
   localize,
   frame_sql: frameSql,
   frame,
-  orphans_found: orphansFound,
-  padded_sql: paddedSql,
-  padded_found: paddedFound,
+  facts_found: factsFound,
   frame_failed: frameFailed,
   facts,
   set_facts: setFacts,

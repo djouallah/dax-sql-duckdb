@@ -13,7 +13,7 @@ function(dax_sql_embed_js output)
   set(names glue.js)
   set(paths ${CMAKE_CURRENT_SOURCE_DIR}/js/glue.js)
   foreach(file ${compiler_files} formats/tmsl.js formats/tmdl.js formats/ossie.js
-               formats/ossie-sql.js)
+               formats/ossie-sql.js formats/model.js)
     list(APPEND names dax-sql/${file})
     list(APPEND paths ${dax_sql}/${file})
   endforeach()

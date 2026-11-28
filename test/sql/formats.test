@@ -227,7 +227,7 @@ true	0	0
 statement error
 CREATE SEMANTIC VIEW wrong FROM 'third_party/dax-sql/README.md';
 ----
-a semantic view is read from
+is read from
 
 # YAML that is not an Ossie model
 statement error

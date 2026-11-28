@@ -59,7 +59,7 @@ contoso	current data (no OneLake table to pin)
 query T
 SELECT dax_sql_facts('contoso');
 ----
-{"pins":{},"orphans":{},"padded":{}}
+{"pins":{},"orphans":{},"trailingSpaces":{}}
 
 statement error
 REFRESH SEMANTIC VIEW nothing_here;

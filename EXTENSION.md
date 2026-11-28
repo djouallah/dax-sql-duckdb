@@ -254,9 +254,12 @@ The compiled SQL then names `<internal>.<schemaName>.<entityName>`, and DuckDB's
   When none gives a token, the attach's error in `tables_from` says why (`no token: …`).
 
   The token is used once, at attach time; nothing refreshes it yet (duckdb-iceberg#1429 would).
-- **Reading the location:** dax-sql's TMSL reader (`formats/tmsl.js`) keeps only `schemaName`
-  and `entityName`. The expression and its URL are read by the extension's own code, from the
-  same parsed JSON, so dax-sql is not changed.
+- **Reading the location:** dax-sql's `directLakeTables(bim)` (`formats/tmsl.js`,
+  djouallah/dax-sql#13) says where each Direct Lake table is: the workspace's and the
+  lakehouse's GUIDs from the expression it reads, and its schema and entity. A table named by its
+  lakehouse's name in the model's workspace is not attached yet: it is read from the search path.
+  The model's file is read by dax-sql's `readModel` (`formats/model.js`, #14), whichever its
+  format.
 - **Which data, and when it changes:** a Direct Lake view reads its tables at the snapshots they
   were at when it was framed: on `CREATE`, when a database holding it is opened, and on
   `REFRESH SEMANTIC VIEW`, as Power BI's Direct Lake reads a model's tables as of its last
@@ -285,24 +288,22 @@ dashboard's 3-day demand peak scans 15 tables where 9 would do.
 The answer depends only on the data, so the extension finds it once per frame and gives it to the
 compiler. The compiler still reads nothing, and every rule stays in dax-sql:
 
-- **The frame** (`FrameView`, the glue's `frame_sql`, `frame`, `orphans_found`, `padded_sql`,
-  `padded_found`):
+- **The frame** (`FrameView`, the glue's `frame_sql`, `frame`, `facts_found`):
   1. each OneLake table's current snapshot, from `iceberg_snapshots()`;
   2. the view's compiler rebuilt with each table read as
      `(SELECT * FROM <catalog>.<schema>.<table> AT (VERSION => <snapshot>))`, a subquery because
      DuckDB takes no alias after `AT`;
-  3. dax-sql's `orphanCheck()` statement run at those snapshots: for each relationship, whether
-     its many side holds a key its one side lacks, NULL and empty keys included
-     (djouallah/dax-sql#7);
-  4. the answers passed to dax-sql's `orphans` option, keyed by `rel.key` (djouallah/dax-sql#6).
-     A relationship with a table that is not pinned gets no answer and is tested in the SQL;
-  5. dax-sql's `trailingSpacesCheck()` statement run at the same snapshots: for each text column
-     of a pinned table, whether a value ends in a space. Power BI trims trailing spaces when it
-     loads text, so `"North  "` is `"North"` there; the columns found are passed to dax-sql's
-     `trailingSpaces` option (keyed by `key`, `Table|Column`) and read trimmed, the others as
-     stored. `data_as_of` lists the columns trimmed. A step of its own: when it fails, the
-     orphan answers stay.
-- **When a step fails** (no `iceberg_snapshots` for the table, the check fails), the view keeps
+  3. dax-sql's `factsCheck()` statement run at those snapshots, one row answering both data
+     questions (djouallah/dax-sql#15): for each relationship, whether its many side holds a key
+     its one side lacks, NULL and empty keys included (#6, #7); for each text column, whether a
+     value ends in a space (Power BI trims trailing spaces when it loads text, so `"North  "` is
+     `"North"` there);
+  4. the row read by dax-sql (`factsCheck().read`) and given back as its `facts` option: no
+     blank-row test for a relationship with no orphan key, and the text columns that hold
+     trailing spaces read trimmed, the others as stored. An answer counts only when every table
+     it reads is pinned (`factsCheck().tables`); the rest are tested in the SQL. `data_as_of`
+     says what was checked and lists the columns trimmed.
+- **When a step fails** (no `iceberg_snapshots` for the table, the facts check fails), the view keeps
   what the steps before it found: unpinned, today's SQL, or pinned with no answers.
   `data_as_of` says why. The answers never outlive the snapshots they were found at.
 - **Not for search-path tables.** A view reading DuckDB tables (a copy of the lakehouse, the

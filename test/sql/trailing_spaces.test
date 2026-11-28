@@ -43,7 +43,7 @@ SELECT count(*) FROM (SELECT Product.Color, AGG(Orders) AS orders FROM contoso G
 
 # the frame's answer (as a OneLake view's frame finds it at its snapshots): Product.Color holds trailing spaces
 query I
-SELECT dax_sql_set_facts('contoso', '{"pins": {}, "orphans": {}, "padded": {"Product|Color": true}}') LIKE '%"Product|Color":true%';
+SELECT dax_sql_set_facts('contoso', '{"pins": {}, "orphans": {}, "trailingSpaces": {"Product|Color": true}}') LIKE '%"Product|Color":true%';
 ----
 true
 
@@ -66,7 +66,7 @@ SELECT count(*) FROM "Product" WHERE "Color" = 'Red  ';
 
 # a column not answered is read as stored
 query I
-SELECT dax_sql_set_facts('contoso', '{"pins": {}, "orphans": {}, "padded": {"Product|Color": false}}') IS NOT NULL;
+SELECT dax_sql_set_facts('contoso', '{"pins": {}, "orphans": {}, "trailingSpaces": {"Product|Color": false}}') IS NOT NULL;
 ----
 true
 
