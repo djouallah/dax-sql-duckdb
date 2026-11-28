@@ -1,33 +1,45 @@
 # dax_sql, a DuckDB extension
 
-`dax_sql` makes a Power BI semantic model a semantic view in DuckDB, queried in plain SQL. The
-model's measures are DAX; they are compiled to DuckDB SQL by
+`dax_sql` makes a Fabric semantic view, an Apache Ossie YAML, a semantic view in DuckDB, queried
+in plain SQL. Its measures are compiled to DuckDB SQL by
 [dax-sql](https://github.com/djouallah/dax-sql), embedded in the extension.
 
-```sql
-LOAD dax_sql;
-CREATE SECRET onelake (TYPE azure, PROVIDER credential_chain);
+In a Fabric Python notebook ([test/integrations/ossie.ipynb](test/integrations/ossie.ipynb)):
 
-CREATE SEMANTIC VIEW sales
-    FROM 'abfss://<workspace>@onelake.dfs.fabric.microsoft.com/<lakehouse>/Files/model.bim';
+```python
+import duckdb
 
-SELECT Product.Color, AGG(Orders) AS orders, AGG("Sales Amount") AS amount
-FROM sales
-WHERE Customer.Country = 'France'
+con = duckdb.connect()
+con.execute("INSTALL dax_sql FROM community")
+con.execute("LOAD dax_sql")
+
+con.execute("""
+CREATE OR REPLACE SEMANTIC VIEW nem
+    FROM 'abfss://<workspace>@onelake.dfs.fabric.microsoft.com/<lakehouse>.Lakehouse/Context/Semantic Views/nem/ossie.yaml'
+""").fetchall()
+
+con.execute("DESCRIBE nem").fetchdf()
+
+con.execute("""
+SELECT dim_region.Region, AGG("Registered units") AS units, AGG("Registered MW") AS mw
+FROM nem
 GROUP BY ALL
-ORDER BY amount DESC;
+ORDER BY ALL
+""").fetchdf()
 ```
 
-- **The model:**
-  - a TMSL `.bim`;
-  - a TMDL `.tmdl`, or a folder of them;
-  - an Apache Ossie `.yaml`, or a folder of them as a Fabric semantic view keeps them
-    (`Context/Semantic Views/<view>/`).
+Run every statement with `con.execute` and fetch its result: `con.sql` does not work with
+semantic views yet.
 
-  The file is read from wherever DuckDB reads: a local path, S3, Azure or OneLake.
-- **The data:** a Direct Lake model names its lakehouse, so the view attaches it through OneLake's
-  Iceberg REST catalog and reads its tables there, pinned to their current snapshots. Any other
-  model reads its tables from the search path.
+- **The model:** an Ossie `.yaml`, or a semantic view's folder of them
+  (`Context/Semantic Views/<view>/`, every `.yaml` in it merged into one model). It is read from
+  wherever DuckDB reads: a local path, S3, Azure or OneLake.
+- **The data:** the YAML's DirectLake expression names its lakehouse, so the view attaches it
+  through OneLake's Iceberg REST catalog and reads its tables there, pinned to their current
+  snapshots. A Fabric notebook needs no secret; elsewhere, create one first:
+  `CREATE SECRET onelake (TYPE azure, PROVIDER credential_chain)`. A YAML that names no
+  lakehouse reads `schema.table` from the search path: `ATTACH` the catalog and `USE` it before
+  the `CREATE`.
 - **Queries:** plain DuckDB SQL. A measure is `AGG(name)`, or `AGG("name with spaces")`. Model
   queries go wherever DuckDB takes a subquery: CTEs, joins, `UNION`, `IN`, `CREATE TABLE AS`.
 - **Statements:**
