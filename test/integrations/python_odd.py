@@ -26,7 +26,7 @@ UNSIGNED = {"allow_unsigned_extensions": "true"}
 TMP = tempfile.mkdtemp()
 FAILED = []
 # What fails today for a reason filed: reported, not failing the run, and said when it works
-KNOWN = {"OR REPLACE with IF NOT EXISTS is refused": "djouallah/dax-sql#34"}
+KNOWN = {}
 NOW_WORKS = []
 
 

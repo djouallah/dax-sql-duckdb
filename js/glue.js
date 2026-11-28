@@ -9,7 +9,7 @@
 // an error carries a `code`: dax-sql's SYNTAX, SEMANTIC, UNSUPPORTED, CATALOG or INPUT.
 import { createViews } from 'dax-sql/src/index.js';
 import { tmslToModel, directLakeTables } from 'dax-sql/formats/tmsl.js';
-import { readModel } from 'dax-sql/formats/model.js';
+import { readModel, modelFiles } from 'dax-sql/formats/model.js';
 import { parse as parseYaml } from 'yaml/dist/index.js';
 
 const lc = s => String(s).toLowerCase();
@@ -324,7 +324,11 @@ function statement(text) {
     return ['create', db ?? '', schema ?? '', name, path, mode].join('\t');
   }
   if (e?.drop) return ['drop', e.drop.name, e.drop.ifExists ? 'true' : 'false'].join('\t');
-  if (e?.refresh) return ['refresh', e.refresh.name, views.get(e.refresh.name).name].join('\t');
+  if (e?.refresh) {
+    // rewrite reports whether the view exists (#36): refreshing none is the extension's error
+    if (!e.refresh.exists) throw fail(`semantic view ${e.refresh.name} does not exist`, 'CATALOG');
+    return ['refresh', e.refresh.name, views.get(e.refresh.name).name].join('\t');
+  }
   if (e?.sql != null) return `sql\t${e.sql}`;
   throw fail(`not a semantic view statement: ${text}`, 'INPUT');
 }
@@ -395,6 +399,8 @@ globalThis.dax_sql = {
   data_as_of: name => dataAsOf(host(name)),
   bind_sql: bindSql,
   statement,
+  // the files of a folder (one path per line, relative to it) readModel reads, one per line (#35)
+  model_files: list => modelFiles(String(list).split('\n').filter(Boolean)).join('\n'),
   forget,
   // a database detached: its views forgotten (its file keeps them)
   forget_database: db => {

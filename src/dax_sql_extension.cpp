@@ -389,9 +389,9 @@ static string JsonString(const string &s) {
 // A model's text, as the glue reads it: a file's own text, or for a folder (a PBIP's definition/,
 // a .SemanticModel folder, a Fabric semantic view's folder of Ossie files) one JSON object of its
 // files' texts, { "<file in it>": "<text>", ... }. The path is read as a file first; one that is no
-// file is a folder, every file in it at any depth given to dax-sql's readModel, which picks what it
-// reads and refuses what is no model (#11; until djouallah/dax-sql#35 says which files it reads).
-static string ReadModel(ClientContext &context, const string &path) {
+// file is a folder: its files at any depth are listed, and those dax-sql's modelFiles says readModel
+// reads are read and given to it, which refuses what is no model (#11).
+static string ReadModel(ClientContext &context, DaxSqlState &state, const string &path) {
 	string not_a_file;
 	try {
 		auto text = ReadFile(context, path);
@@ -427,18 +427,22 @@ static string ReadModel(ClientContext &context, const string &path) {
 		}
 	}
 	std::sort(files.begin(), files.end());
+	auto key = [&](const string &file) {
+		return StringUtil::StartsWith(file, dir) ? file.substr(dir.size() + 1) : file;
+	};
+	string listed;
+	for (auto &file : files) {
+		listed += key(file) + "\n";
+	}
+	auto wanted = StringUtil::Split(state.js.Call("model_files", {listed}), '\n');
+	std::set<string> reads(wanted.begin(), wanted.end());
 	string out = "{";
 	idx_t read = 0;
 	for (auto &file : files) {
-		string text;
-		try {
-			text = ReadFile(context, file);
-		} catch (std::exception &) {
-			// a folder the glob listed as a file
+		if (!reads.count(key(file))) {
 			continue;
 		}
-		auto key = StringUtil::StartsWith(file, dir) ? file.substr(dir.size() + 1) : file;
-		out += (read++ ? ",\n" : "") + JsonString(key) + ": " + JsonString(text);
+		out += (read++ ? ",\n" : "") + JsonString(key(file)) + ": " + JsonString(ReadFile(context, file));
 	}
 	return out + "}";
 }
@@ -957,7 +961,7 @@ static DefinedView DefineView(ClientContext &context, DaxSqlState &state, const 
 	if (v.schema.empty()) {
 		v.schema = DEFAULT_SCHEMA;
 	}
-	v.text = ReadModel(context, v.path);
+	v.text = ReadModel(context, state, v.path);
 	auto outcome = StringUtil::Split(
 	    state.js.Call("define", {v.db, v.schema, v.name, v.path, v.text, mode, state.Own(v.db)}), '\n');
 	state.RefreshNames();
