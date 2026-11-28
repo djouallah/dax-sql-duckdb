@@ -106,6 +106,14 @@ SELECT (SELECT AGG(Orders) FROM contoso) = (SELECT count(*) FROM "Sales");
 ----
 true
 
+# the view named in full or in part: database.schema.view, schema.view, database.view
+query I
+SELECT (SELECT AGG(Orders) FROM memory.main.contoso) = (SELECT count(*) FROM "Sales")
+   AND (SELECT AGG(Orders) FROM main.contoso) = (SELECT count(*) FROM "Sales")
+   AND (SELECT AGG(Orders) FROM memory.contoso) = (SELECT count(*) FROM "Sales");
+----
+true
+
 # grouped, against the same groups in plain SQL (a sale with no product is the blank row: NULL)
 query I
 SELECT count(*) FROM (
