@@ -282,6 +282,10 @@ function build(v) {
   }
   const orphans = v.frame?.orphans;
   if (orphans && Object.keys(orphans).length) options.orphans = rel => orphans[rel.key];
+  // The text columns found to hold trailing spaces are read trimmed, as Power BI loads them; any
+  // other is read as stored (dax-sql's trailingSpaces: only true changes the SQL).
+  const padded = v.frame?.padded;
+  if (padded && Object.values(padded).some(Boolean)) options.trailingSpaces = c => padded[c.key] === true;
   v.compiler = createCompiler(tmslToModel(v.bim), options);
   v.types = undefined;
 }
@@ -355,7 +359,7 @@ function frame(name, row, at) {
   lakeTables(v).forEach((t, i) => {
     if (/^\d+$/.test(vals[i] ?? '')) pins[t] = vals[i];
   });
-  v.frame = { at, pins, orphans: {}, checked: [] };
+  v.frame = { at, pins, orphans: {}, checked: [], padded: {}, paddedChecked: [] };
   build(v);
   const { sql, rels } = v.compiler.orphanCheck();
   v.frame.checked = rels.map(r => (pins[lc(r.many.table)] && pins[lc(r.one.table)] ? r.key : null));
@@ -376,28 +380,53 @@ function orphansFound(name, row) {
   return '';
 }
 
-// A step of the frame that failed ('pins' or 'orphans'): what was found before it stays, and
-// SHOW SEMANTIC VIEWS says why.
+// The statement that finds the text columns holding trailing spaces at the pinned snapshots
+// (dax-sql's trailingSpacesCheck), '' when none can be checked. A column is answered only when its
+// table is pinned: a table read as it is now could change under the answer.
+function paddedSql(name) {
+  const v = view(name);
+  if (!v.frame) return '';
+  const { sql, columns } = v.compiler.trailingSpacesCheck();
+  v.frame.paddedChecked = columns.map(c => (v.frame.pins[lc(c.table)] ? c.key : null));
+  return v.frame.paddedChecked.some(k => k) ? sql : '';
+}
+
+// The row of the statement paddedSql returned: true where a text column holds trailing spaces.
+function paddedFound(name, row) {
+  const v = view(name);
+  const vals = String(row).split('	');
+  const padded = {};
+  v.frame.paddedChecked.forEach((key, i) => {
+    if (key && (vals[i] === 'true' || vals[i] === 'false')) padded[key] = vals[i] === 'true';
+  });
+  v.frame.padded = padded;
+  build(v);
+  return '';
+}
+
+// A step of the frame that failed ('pins', 'orphans' or 'trailing spaces'): what was found before
+// it stays, and SHOW SEMANTIC VIEWS says why.
 function frameFailed(name, step, error) {
   const v = view(name);
   if (step === 'pins') v.frame = null;
-  else if (v.frame) v.frame.orphans = {};
+  else if (v.frame && step === 'orphans') v.frame.orphans = {};
+  else if (v.frame) v.frame.padded = {};
   v.frameError = `${step}: ${String(error).split('\n')[0]}`;
   build(v);
   return '';
 }
 
-// The frame as JSON ({ pins, orphans }), and a frame given as JSON: the drift check gives the
+// The frame as JSON ({ pins, orphans, padded }), and a frame given as JSON: the drift check gives the
 // SQL dax-sql writes in Node the same frame as the extension's (.github/scripts/drift.py), and
 // the facts check compares answers with and without the orphans at the same snapshots.
 function facts(name) {
   const v = view(name);
-  return JSON.stringify({ pins: v.frame?.pins ?? {}, orphans: v.frame?.orphans ?? {} });
+  return JSON.stringify({ pins: v.frame?.pins ?? {}, orphans: v.frame?.orphans ?? {}, padded: v.frame?.padded ?? {} });
 }
 function setFacts(name, json) {
   const v = view(name);
   const f = JSON.parse(json);
-  v.frame = { at: v.frame?.at ?? null, pins: f.pins ?? {}, orphans: f.orphans ?? {}, checked: [] };
+  v.frame = { at: v.frame?.at ?? null, pins: f.pins ?? {}, orphans: f.orphans ?? {}, checked: [], padded: f.padded ?? {}, paddedChecked: [] };
   build(v);
   return '';
 }
@@ -415,7 +444,12 @@ function dataAsOf(v) {
     : `relationships not checked${v.frameError ? ` (${v.frameError})` : ''}`;
   const unpinned = lakeTables(v).filter(t => !(t in f.pins));
   const read = unpinned.length ? ` (no snapshot, read as they are now: ${unpinned.join(', ')})` : '';
-  return `snapshots of ${f.at ?? 'unknown time'}, ${n} of ${all} tables pinned${read}; ${checked}`;
+  const texts = Object.entries(f.padded ?? {});
+  const trimmed = texts.filter(([, x]) => x).map(([k]) => k.replace('|', '.'));
+  const spaces = texts.length
+    ? `; ${texts.length} text columns checked, ${trimmed.length ? `trimmed: ${trimmed.join(', ')}` : 'none with trailing spaces'}`
+    : '';
+  return `snapshots of ${f.at ?? 'unknown time'}, ${n} of ${all} tables pinned${read}; ${checked}${spaces}`;
 }
 
 // Where a view's tables are read from, as SHOW SEMANTIC VIEWS says.
@@ -725,6 +759,8 @@ globalThis.dax_sql = {
   frame_sql: frameSql,
   frame,
   orphans_found: orphansFound,
+  padded_sql: paddedSql,
+  padded_found: paddedFound,
   frame_failed: frameFailed,
   facts,
   set_facts: setFacts,

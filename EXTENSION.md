@@ -285,7 +285,8 @@ dashboard's 3-day demand peak scans 15 tables where 9 would do.
 The answer depends only on the data, so the extension finds it once per frame and gives it to the
 compiler. The compiler still reads nothing, and every rule stays in dax-sql:
 
-- **The frame** (`FrameView`, the glue's `frame_sql`, `frame`, `orphans_found`):
+- **The frame** (`FrameView`, the glue's `frame_sql`, `frame`, `orphans_found`, `padded_sql`,
+  `padded_found`):
   1. each OneLake table's current snapshot, from `iceberg_snapshots()`;
   2. the view's compiler rebuilt with each table read as
      `(SELECT * FROM <catalog>.<schema>.<table> AT (VERSION => <snapshot>))`, a subquery because
@@ -294,7 +295,13 @@ compiler. The compiler still reads nothing, and every rule stays in dax-sql:
      its many side holds a key its one side lacks, NULL and empty keys included
      (djouallah/dax-sql#7);
   4. the answers passed to dax-sql's `orphans` option, keyed by `rel.key` (djouallah/dax-sql#6).
-     A relationship with a table that is not pinned gets no answer and is tested in the SQL.
+     A relationship with a table that is not pinned gets no answer and is tested in the SQL;
+  5. dax-sql's `trailingSpacesCheck()` statement run at the same snapshots: for each text column
+     of a pinned table, whether a value ends in a space. Power BI trims trailing spaces when it
+     loads text, so `"North  "` is `"North"` there; the columns found are passed to dax-sql's
+     `trailingSpaces` option (keyed by `key`, `Table|Column`) and read trimmed, the others as
+     stored. `data_as_of` lists the columns trimmed. A step of its own: when it fails, the
+     orphan answers stay.
 - **When a step fails** (no `iceberg_snapshots` for the table, the check fails), the view keeps
   what the steps before it found: unpinned, today's SQL, or pinned with no answers.
   `data_as_of` says why. The answers never outlive the snapshots they were found at.

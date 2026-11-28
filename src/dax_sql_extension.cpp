@@ -558,7 +558,8 @@ static string AttachOneLake(Connection &con, optional_ptr<ClientContext> lookup,
 //===--------------------------------------------------------------------===//
 // The frame (EXTENSION.md, Facts from the data): a Direct Lake view's tables pinned to the
 // snapshots they are at now, and dax-sql told which relationships' many sides hold keys their one
-// side lacks at those snapshots. The glue writes both statements; a step that fails leaves the
+// side lacks, and which text columns hold trailing spaces, at those snapshots. The glue writes the
+// statements; a step that fails leaves the
 // view as the step before left it (unpinned, or pinned with no answers), and the reason is shown.
 //===--------------------------------------------------------------------===//
 // A statement's one row, its values tab-separated; the error when it fails or has not one row.
@@ -607,15 +608,25 @@ static void FrameView(Connection &con, DaxSqlState &state, const string &name) {
 		}
 		auto at = Timestamp::ToString(Timestamp::GetCurrentTimestamp()) + " UTC";
 		auto check = state.js.Call("frame", {name, row, at});
-		if (check.empty()) {
-			return;
+		if (!check.empty()) {
+			error = QueryOneRow(con, check, row);
+			if (!error.empty()) {
+				state.js.Call("frame_failed", {name, "orphans", error});
+			} else {
+				state.js.Call("orphans_found", {name, row});
+			}
 		}
-		error = QueryOneRow(con, check, row);
-		if (!error.empty()) {
-			state.js.Call("frame_failed", {name, "orphans", error});
-			return;
+		// The text columns holding trailing spaces, at the same snapshots: a step of its own, so
+		// a failure keeps the orphan answers found before it
+		auto padded = state.js.Call("padded_sql", {name});
+		if (!padded.empty()) {
+			error = QueryOneRow(con, padded, row);
+			if (!error.empty()) {
+				state.js.Call("frame_failed", {name, "trailing spaces", error});
+			} else {
+				state.js.Call("padded_found", {name, row});
+			}
 		}
-		state.js.Call("orphans_found", {name, row});
 	} catch (std::exception &e) {
 		// The view stays as the last step left it: today's SQL at worst.
 		try {

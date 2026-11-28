@@ -1,0 +1,76 @@
+# name: test/sql/trailing_spaces.test
+# description: text values with trailing spaces read as Power BI loads them (trimmed) once the frame says which columns hold them
+# group: [sql]
+
+require dax_sql
+
+statement ok
+CREATE TABLE "Sales" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Sales.csv', header = true, types = {'Amount': 'DECIMAL(18,4)'});
+
+statement ok
+CREATE TABLE "Product" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Product.csv', header = true);
+
+statement ok
+CREATE TABLE "Category" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Category.csv', header = true);
+
+statement ok
+CREATE TABLE "Customer" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Customer.csv', header = true);
+
+statement ok
+CREATE TABLE "Date" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Date.csv', header = true);
+
+statement ok
+CREATE TABLE "Returns" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Returns.csv', header = true);
+
+statement ok
+CREATE TABLE "CityTarget" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/CityTarget.csv', header = true);
+
+statement ok
+CREATE TABLE "Staff" AS SELECT * FROM read_csv('third_party/dax-sql/conformance/models/contoso/data/Staff.csv', header = true);
+
+# the Jersey's colour stored with trailing spaces: 'Red  ', the Road Bike's 'Red'
+statement ok
+UPDATE "Product" SET "Color" = 'Red  ' WHERE "ProductKey" = 3;
+
+statement ok
+CREATE SEMANTIC VIEW contoso FROM 'third_party/dax-sql/conformance/models/contoso/model.bim';
+
+# not known yet (a search-path view has no frame): read as stored, two reds
+query I
+SELECT count(*) FROM (SELECT Product.Color, AGG(Orders) AS orders FROM contoso GROUP BY ALL) WHERE Color LIKE 'Red%';
+----
+2
+
+# the frame's answer (as a OneLake view's frame finds it at its snapshots): Product.Color holds trailing spaces
+query I
+SELECT dax_sql_set_facts('contoso', '{"pins": {}, "orphans": {}, "padded": {"Product|Color": true}}') LIKE '%"Product|Color":true%';
+----
+true
+
+# read trimmed, as Power BI loads it: one red, with every red order, and a filter on 'Red' finds them all
+query TI
+SELECT Product.Color, AGG(Orders) AS orders FROM contoso WHERE Product.Color LIKE 'Red%' GROUP BY ALL;
+----
+Red	6
+
+query I
+SELECT AGG(Orders) FROM contoso WHERE Product.Color = 'Red';
+----
+6
+
+# the stored value is the same as before: only the semantic view reads it trimmed
+query I
+SELECT count(*) FROM "Product" WHERE "Color" = 'Red  ';
+----
+1
+
+# a column not answered is read as stored
+query I
+SELECT dax_sql_set_facts('contoso', '{"pins": {}, "orphans": {}, "padded": {"Product|Color": false}}') IS NOT NULL;
+----
+true
+
+query I
+SELECT count(*) FROM (SELECT Product.Color, AGG(Orders) AS orders FROM contoso GROUP BY ALL) WHERE Color LIKE 'Red%';
+----
+2
