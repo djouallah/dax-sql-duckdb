@@ -21,8 +21,8 @@ con = duckdb.connect()
 con.execute("INSTALL dax_sql FROM community")
 con.execute("LOAD dax_sql")
 
-# Not needed in a Fabric Python notebook, which signs in to OneLake by itself. Needed elsewhere;
-# not yet tested in a Fabric Spark notebook.
+# Not needed in a Fabric Python notebook. On a laptop it signs in with `az login`; with OIDC
+# (GitHub Actions, Kubernetes) through workload identity.
 con.execute("CREATE OR REPLACE SECRET onelake (TYPE azure, PROVIDER credential_chain)")
 
 con.execute("""
