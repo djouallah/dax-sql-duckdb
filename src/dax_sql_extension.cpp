@@ -975,9 +975,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ParserExtension::Register(DBConfig::GetConfig(db), std::move(parser));
 	{
 		Connection con(db);
-		auto current = con.Query("SELECT current_setting('allow_parser_override_extension')");
-		if (!current->HasError() && current->RowCount() == 1 &&
-		    StringUtil::CIEquals(current->GetValue(0, 0).ToString(), "default")) {
+		auto current = QueryRows(con, "SELECT current_setting('allow_parser_override_extension')::VARCHAR");
+		if (current.size() == 1 && StringUtil::CIEquals(current[0][0], "default")) {
 			con.Query("SET GLOBAL allow_parser_override_extension = 'fallback'");
 		}
 	}
