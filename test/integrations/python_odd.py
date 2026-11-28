@@ -219,6 +219,8 @@ def _():
         "DESCRIBE a model query": lambda: [r[0] for r in con.sql(f"DESCRIBE {Q}").fetchall()]
         == ["Color", "orders", "amount"],
         "SUMMARIZE a model query": lambda: len(con.sql(f"SUMMARIZE {Q}").fetchall()) == 3,
+        "SUMMARIZE a model query, shown": lambda: con.sql(f"SUMMARIZE {Q}").show() or True,
+        "EXPLAIN a model query, shown": lambda: con.sql(f"EXPLAIN {Q}").show() or True,
         "SUMMARIZE a model query in parentheses": lambda: len(con.sql(f"SUMMARIZE ({Q})").fetchall()) == 3,
         "EXPLAIN ANALYZE a model query": lambda: len(con.sql(f"EXPLAIN ANALYZE {Q}").fetchall()) > 0,
         "COPY a model query to parquet": lambda: do(con, f"COPY ({Q}) TO '{parquet}' (FORMAT parquet)")

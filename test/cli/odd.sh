@@ -17,7 +17,8 @@ Q='SELECT Product.Color, AGG(Orders) AS orders, AGG("Sales Amount") AS amount FR
 
 # The tables of test/cli/contoso.sql, and the view over them
 grep '^CREATE TABLE' test/cli/contoso.sql > "$W/tables.sql"
-{ cat "$W/tables.sql"; echo "CREATE SEMANTIC VIEW contoso FROM '$MODEL';"; } > "$W/setup.sql"
+# CREATE's row not shown: what a case prints is its own commands' rows
+{ cat "$W/tables.sql"; echo ".output /dev/null"; echo "CREATE SEMANTIC VIEW contoso FROM '$MODEL';"; echo ".output"; } > "$W/setup.sql"
 duck() { "$DUCKDB" -unsigned "$@"; }
 # setup [database] [flags] -c ...: the database and the flags first, then LOAD and the view, then the commands
 setup() {
@@ -112,7 +113,7 @@ case_ "a database file: again, read-only, without the extension" file
 
 readonly_create() {
   local out
-  out=$(duck -csv -readonly "$W/shop.duckdb" -c "LOAD '$EXT'" -c "CREATE SEMANTIC VIEW x FROM '$MODEL'" -c "$Q" 2>&1)
+  out=$(duck -csv -readonly "$W/shop.duckdb" -c ".bail off" -c "LOAD '$EXT'" -c "CREATE SEMANTIC VIEW x FROM '$MODEL'" -c "$Q" 2>&1)
   echo "$out"
   echo "$out" | grep -qi "read" && echo "$out" | grep -q Red && ! echo "$out" | grep -q INTERNAL
 }
