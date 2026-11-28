@@ -18,21 +18,21 @@ Then:
 import duckdb
 
 con = duckdb.connect()
-con.sql("INSTALL dax_sql FROM community")
-con.sql("LOAD dax_sql")
+con.execute("INSTALL dax_sql FROM community")
+con.execute("LOAD dax_sql")
 
 # Not needed in a Fabric Python notebook. On a laptop it signs in with `az login`; with OIDC
 # (GitHub Actions, Kubernetes) through workload identity.
-con.sql("CREATE OR REPLACE SECRET onelake (TYPE azure, PROVIDER credential_chain)")
+con.execute("CREATE OR REPLACE SECRET onelake (TYPE azure, PROVIDER credential_chain)")
 
-con.sql("""
+con.execute("""
 CREATE OR REPLACE SEMANTIC VIEW nem
     FROM 'abfss://<workspace>@onelake.dfs.fabric.microsoft.com/<lakehouse>.Lakehouse/Context/Semantic Views/nem/ossie.yaml'
-""").show()
+""").fetchall()
 
-con.sql("DESCRIBE nem").show()
+con.execute("DESCRIBE nem").fetchdf()
 
-con.sql("""
+con.execute("""
 WITH g AS (
     SELECT dim_region.State AS state, dim_calendar.year AS year, AGG("Generation MWh") AS mwh
     FROM nem
@@ -42,10 +42,11 @@ SELECT state, year, round(mwh) AS mwh,
        round(100 * mwh / sum(mwh) OVER (PARTITION BY year), 1) AS pct_of_year
 FROM g
 ORDER BY year, state
-""").show()
+""").fetchdf()
 ```
 
-`LOAD` goes in a call of its own: the statements after it parse once it has run.
+Run every statement with `con.execute` and fetch its result: `con.sql` does not work with
+semantic views yet.
 
 - **The model:** an Ossie `.yaml`, or a semantic view's folder of them
   (`Context/Semantic Views/<view>/`, every `.yaml` in it merged into one model). It is read from
