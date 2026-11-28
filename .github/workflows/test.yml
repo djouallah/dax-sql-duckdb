@@ -66,8 +66,8 @@ jobs:
         with:
           python-version: "3.12"
       # In a step of its own: every Python step after it needs it, whichever step fails first
-      - name: The duckdb Python package of the extension's DuckDB version
-        run: pip install -q duckdb==2.0.1
+      - name: The duckdb Python package of the extension's DuckDB version (pandas and pyarrow, as a notebook has them)
+        run: pip install -q duckdb==2.0.1 pandas pyarrow
       - name: The test fixtures are what the tools write (test/models/fixtures)
         # formats.test and persistence.test read contoso as TMDL and aac's ossie.yaml as a Fabric
         # semantic view's folder of YAML files. They are committed, so the sqllogictests need no step
