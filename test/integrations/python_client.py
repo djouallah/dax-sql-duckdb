@@ -11,10 +11,45 @@ as it is parsed (#1), and the extension's statements must be ones a client runs 
 Each check fails with the client's own error.
 """
 import sys
+import traceback
 
 import duckdb
+import duckdb._relation as _relation
+import duckdb._seam as _seam
 
 EXT = sys.argv[1]
+
+# What the client sends, printed when a check fails
+SENT = []
+_submit, _bind = _seam.submit, _seam.bind
+
+
+def _spy_submit(con, sql, values, *args, **kwargs):
+    SENT.append(("submit", sql))
+    return _submit(con, sql, values, *args, **kwargs)
+
+
+def _spy_bind(con, sql, *args, **kwargs):
+    SENT.append(("bind", sql if isinstance(sql, str) else f"<parsed> {sql.query}"))
+    return _bind(con, sql, *args, **kwargs)
+
+
+_seam.submit = _relation._seam.submit = _spy_submit
+_seam.bind = _relation._seam.bind = _spy_bind
+
+
+def _report(*_):
+    traceback.print_exc()
+    for kind, sql in SENT[-4:]:
+        print(f"===== {kind}\n{sql}")
+        if kind == "submit" or not sql.startswith("<parsed>"):
+            try:
+                print("----- dax_sql_rewrite\n" + con.execute("SELECT dax_sql_rewrite(?)", [sql]).fetchone()[0])
+            except Exception as error:  # noqa: BLE001
+                print(f"----- dax_sql_rewrite failed: {error}")
+
+
+sys.excepthook = _report
 DATA = "third_party/dax-sql/conformance/models/contoso/data"
 MODEL = "third_party/dax-sql/conformance/models/contoso/model.bim"
 TABLES = ["Sales", "Product", "Category", "Customer", "Date", "Returns", "CityTarget", "Staff"]
