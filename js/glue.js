@@ -462,27 +462,28 @@ const ITEM_COLUMNS = [['database_name', 'VARCHAR'], ['schema_name', 'VARCHAR'], 
   ['name', 'VARCHAR'], ['data_type', 'VARCHAR'], ['expression', 'VARCHAR'], ['format_string', 'VARCHAR'], ['hidden', 'BOOLEAN'],
   ['comment', 'VARCHAR']];
 
-function dimensions(v, only) {
+// The model as dax-sql lists it (describe(), dimensionsOf(): its API, not its own objects).
+function dimensions(v, tables = v.compiler.describe().tables) {
   const out = [];
-  for (const t of v.compiler.model.tables.values()) {
-    if (only && !only(t)) continue;
-    for (const c of t.columns) out.push([v.db, v.schema, v.name, t.name, c.name, duckType(c.type), c.expr, null, t.hidden, null]);
+  for (const t of tables) {
+    for (const c of t.columns) out.push([v.db, v.schema, v.name, t.name, c.name, duckType(c.type), c.expression, null, t.hidden, null]);
   }
   return out;
 }
 
 function metrics(v) {
-  return [...v.compiler.model.measures.values()].map(m =>
-    [v.db, v.schema, v.name, m.table.name, m.name, duckType(measureType(v, m)), m.text, m.formatString, false, null]);
+  return v.compiler.describe().measures.map(m =>
+    [v.db, v.schema, v.name, m.table, m.name, duckType(measureType(v, m)), m.expression, m.formatString, false, null]);
 }
 
 function describe(v) {
   const cols = [['column_name', 'VARCHAR'], ['column_type', 'VARCHAR'], ['null', 'VARCHAR'], ['key', 'VARCHAR'], ['default', 'VARCHAR'], ['extra', 'VARCHAR']];
   const list = [];
-  for (const t of v.compiler.model.tables.values()) {
+  const model = v.compiler.describe();
+  for (const t of model.tables) {
     for (const c of t.columns) list.push([`${t.name}.${c.name}`, duckType(c.type), c.nullable ? 'YES' : 'NO', c.unique ? 'PRI' : null, null, 'column']);
   }
-  for (const m of v.compiler.model.measures.values()) list.push([m.name, duckType(measureType(v, m)), 'YES', null, null, 'measure']);
+  for (const m of model.measures) list.push([m.name, duckType(measureType(v, m)), 'YES', null, null, 'measure']);
   return rows(cols, list);
 }
 
@@ -575,10 +576,9 @@ function show(kind, name, metric) {
   const v = view(name);
   if (kind === 'metrics') return rows(ITEM_COLUMNS, metrics(v));
   if (!metric) return rows(ITEM_COLUMNS, dimensions(v));
-  const m = v.compiler.model.measures.get(lc(metric));
+  const m = v.compiler.describe().measures.find(x => lc(x.name) === lc(metric));
   if (!m) throw fail(`semantic view ${v.name} has no metric ${metric}`, 'CATALOG');
-  const model = v.compiler.model, state = model.state();
-  return rows(ITEM_COLUMNS, dimensions(v, t => model.reaches(t, m.table, state)));
+  return rows(ITEM_COLUMNS, dimensions(v, v.compiler.dimensionsOf(m.name)));
 }
 
 // DROP SEMANTIC VIEW (the grammar's dax_sql_drop): the view forgotten; its database, schema and
